@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Deepest Network Control</string>
+    <string name="tile_label">DNC Shield</string>
+    <string name="notification_channel">DNC VPN Service</string>
+    <string name="notification_active">DNC Active — Protecting your network</string>
+    <string name="btn_activate">ACTIVATE DNC</string>
+    <string name="btn_deactivate">DEACTIVATE DNC</string>
+    <string name="status_protected">Network protection active</string>
+    <string name="status_unprotected">Network unprotected</string>
+    <string name="stats_blocked">Blocked</string>
+    <string name="stats_dns">DNS Queries</string>
+    <string name="stats_redirects">Redirects Blocked</string>
+    <string name="stats_rules">Active Rules</string>
+    <string name="toggle_dns">DNS Filtering</string>
+    <string name="toggle_https">HTTPS Filtering</string>
+    <string name="toggle_redirect">Redirect Blocking</string>
+    <string name="nav_dashboard">Dashboard</string>
+    <string name="nav_filters">Filters</string>
+    <string name="nav_log">Log</string>
+    <string name="nav_settings">Settings</string>
+</resources>
