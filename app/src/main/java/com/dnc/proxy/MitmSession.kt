@@ -278,7 +278,11 @@ class MitmSession(
                     close()
                     return null
                 }
-                SSLEngineResult.Status.ERROR -> {
+                SSLEngineResult.Status.BUFFER_OVERFLOW -> {
+                    Log.w(TAG, "Client TLS buffer overflow for $domain")
+                    return null
+                }
+                else -> {
                     Log.w(TAG, "Client TLS error for $domain — likely cert pinning")
                     state = State.FAILED
                     return null

@@ -90,10 +90,10 @@ class ResourceRegistry {
         val gif1x1 = byteArrayOf(
             0x47, 0x49, 0x46, 0x38, 0x39, 0x61, // GIF89a
             0x01, 0x00, 0x01, 0x00,             // 1x1
-            0x80, 0x00, 0x00,                    // GCT flag, color resolution, sort, GCT size
-            0xFF, 0xFF, 0xFF,                    // Color 0: white (background)
+            0x80.toByte(), 0x00, 0x00,           // GCT flag, color resolution, sort, GCT size
+            0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), // Color 0: white (background)
             0x00, 0x00, 0x00,                    // Color 1: black
-            0x21, 0xF9, 0x04, 0x01,             // GCE: dispose=none, user input, transparent
+            0x21, 0xF9.toByte(), 0x04, 0x01,    // GCE: dispose=none, user input, transparent
             0x00, 0x00, 0x00,                    // delay, transparent color index=0
             0x2C, 0x00, 0x00, 0x00, 0x00,       // Image descriptor: left, top
             0x01, 0x00, 0x01, 0x00, 0x00,       // width, height, no LCT

@@ -128,7 +128,7 @@ object FilterListParser {
         // Parse options
         val options = mutableSetOf<FilterOption>()
         var domains: Set<String>? = null
-        var excludedDomains = mutableSetOf<String>()
+        var excludedDomains: Set<String> = emptySet()
         var redirectResource: String? = null
         var removeParams: String? = null
         var cspDirective: String? = null

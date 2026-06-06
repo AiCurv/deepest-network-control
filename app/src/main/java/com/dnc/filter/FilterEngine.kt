@@ -69,7 +69,7 @@ class FilterEngine private constructor(private val context: Context) {
     private var evaluatedRequests = 0L
 
     // URL matcher for efficient pattern matching
-    private val urlMatcher = UrlMatcher()
+    private val urlMatcher = UrlMatcher
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())

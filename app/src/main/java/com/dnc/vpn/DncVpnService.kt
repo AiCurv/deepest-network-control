@@ -37,6 +37,15 @@ class DncVpnService : VpnService() {
 
         private val _isRunning = MutableStateFlow(false)
         val isRunning: StateFlow<Boolean> = _isRunning
+
+        private val _blockedCount = MutableStateFlow(0)
+        val blockedCount: StateFlow<Int> = _blockedCount
+
+        private val _dnsQueryCount = MutableStateFlow(0)
+        val dnsQueryCount: StateFlow<Int> = _dnsQueryCount
+
+        private val _redirectsBlockedCount = MutableStateFlow(0)
+        val redirectsBlockedCount: StateFlow<Int> = _redirectsBlockedCount
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -49,13 +58,7 @@ class DncVpnService : VpnService() {
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    // Stats
-    private val _blockedCount = MutableStateFlow(0)
-    private val _dnsQueryCount = MutableStateFlow(0)
-    private val _redirectsBlockedCount = MutableStateFlow(0)
-    val blockedCount: StateFlow<Int> = _blockedCount
-    val dnsQueryCount: StateFlow<Int> = _dnsQueryCount
-    val redirectsBlockedCount: StateFlow<Int> = _redirectsBlockedCount
+
 
     override fun onCreate() {
         super.onCreate()

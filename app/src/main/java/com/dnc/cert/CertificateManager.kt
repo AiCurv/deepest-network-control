@@ -404,7 +404,7 @@ class CertificateManager private constructor(private val context: Context) {
 
         // Create SSLContext
         val keyManagerFactory = javax.net.ssl.KeyManagerFactory.getInstance(
-            javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm
+            javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
         )
         keyManagerFactory.init(keyStore, null)
 
@@ -420,7 +420,7 @@ class CertificateManager private constructor(private val context: Context) {
      */
     fun createServerSslContext(): javax.net.ssl.SSLContext {
         val trustManagerFactory = javax.net.ssl.TrustManagerFactory.getInstance(
-            javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm
+            javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm()
         )
         trustManagerFactory.init(null as java.security.KeyStore?)
 
@@ -456,7 +456,7 @@ class CertificateManager private constructor(private val context: Context) {
         try {
             val caCert = caCertificate ?: return false
             val trustManager = javax.net.ssl.TrustManagerFactory.getInstance(
-                javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm
+                javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm()
             )
             trustManager.init(null as java.security.KeyStore?)
 

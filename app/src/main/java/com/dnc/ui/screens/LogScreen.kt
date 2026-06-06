@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.sp
 import com.dnc.proxy.HttpProxy
 import com.dnc.ui.theme.*
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LogScreen(
     logEntries: List<HttpProxy.RequestLogEntry>

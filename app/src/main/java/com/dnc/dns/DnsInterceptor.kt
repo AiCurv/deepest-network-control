@@ -64,10 +64,10 @@ class DnsInterceptor(private val vpnService: DncVpnService) {
     val stats: DnsStats get() = _stats.copy()
 
     data class DnsStats(
-        val totalQueries: Int = 0,
-        val blocked: Int = 0,
-        val cached: Int = 0,
-        val forwarded: Int = 0
+        var totalQueries: Int = 0,
+        var blocked: Int = 0,
+        var cached: Int = 0,
+        var forwarded: Int = 0
     )
 
     fun start() {
