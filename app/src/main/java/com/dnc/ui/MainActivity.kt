@@ -11,15 +11,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
-import androidx.navigation.compose.currentBackStackEntryAsState
-import androidx.navigation.compose.rememberNavController
+import com.dnc.data.DncRepository
 import com.dnc.ui.screens.*
 import com.dnc.ui.theme.DncTheme
 import com.dnc.vpn.DncVpnService
 
 class MainActivity : ComponentActivity() {
+
+    private lateinit var repository: DncRepository
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -31,6 +30,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        repository = DncRepository(this)
+
         setContent {
             DncTheme {
                 Surface(
@@ -44,7 +45,8 @@ class MainActivity : ComponentActivity() {
                             } else {
                                 stopVpnService()
                             }
-                        }
+                        },
+                        repository = repository
                     )
                 }
             }

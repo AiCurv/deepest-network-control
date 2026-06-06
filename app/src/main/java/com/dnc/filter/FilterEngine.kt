@@ -77,6 +77,8 @@ class FilterEngine private constructor(private val context: Context) {
     init {
         loadCustomRules()
         loadDefaultLists()
+        // Auto-download EasyList on first launch so blocking works out of the box
+        autoDownloadDefaultLists()
     }
 
     // ========== Filter List Management ==========
@@ -453,8 +455,7 @@ class FilterEngine private constructor(private val context: Context) {
     }
 
     private fun loadDefaultLists() {
-        // We don't auto-download on init — lists are loaded when the user enables them
-        // But we pre-configure the default list metadata
+        // Pre-configure the default list metadata — enabled by default
         val defaults = listOf(
             Triple("easylist", "EasyList", "https://easylist.to/easylist/easylist.txt"),
             Triple("easyprivacy", "EasyPrivacy", "https://easylist.to/easylist/easyprivacy.txt"),
@@ -469,8 +470,32 @@ class FilterEngine private constructor(private val context: Context) {
                     id = id,
                     name = name,
                     url = url,
-                    enabled = false // Disabled by default, user enables them
+                    enabled = true // Enabled by default — auto-download on startup
                 )
+            }
+        }
+    }
+
+    /**
+     * Auto-download enabled filter lists in the background.
+     * This ensures blocking works as soon as the app starts.
+     */
+    private fun autoDownloadDefaultLists() {
+        scope.launch {
+            for ((id, info) in filterLists) {
+                if (info.enabled && info.ruleCount == 0) {
+                    try {
+                        Log.i(TAG, "Auto-downloading filter list: ${info.name}")
+                        val result = addFilterList(id, info.name, info.url)
+                        result.onSuccess { count ->
+                            Log.i(TAG, "Auto-loaded $count rules from ${info.name}")
+                        }.onFailure { error ->
+                            Log.e(TAG, "Auto-download failed for ${info.name}: ${error.message}")
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Auto-download error for ${info.name}: ${e.message}")
+                    }
+                }
             }
         }
     }

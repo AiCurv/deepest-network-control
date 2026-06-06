@@ -16,15 +16,28 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.dnc.filter.FilterEngine
 import com.dnc.ui.theme.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 fun FilterListsScreen(
     filterEngine: FilterEngine
 ) {
-    val filterLists = filterEngine.getFilterLists()
-    val customRules = filterEngine.getCustomRules()
+    var filterLists by remember { mutableStateOf(filterEngine.getFilterLists()) }
+    var customRules by remember { mutableStateOf(filterEngine.getCustomRules()) }
     var newRuleText by remember { mutableStateOf("") }
     var newListUrl by remember { mutableStateOf("") }
+    var isLoading by remember { mutableStateOf(false) }
+    var statusMessage by remember { mutableStateOf("") }
+
+    // Refresh list data periodically
+    LaunchedEffect(Unit) {
+        while (true) {
+            filterLists = filterEngine.getFilterLists()
+            customRules = filterEngine.getCustomRules()
+            kotlinx.coroutines.delay(2000)
+        }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -47,9 +60,49 @@ fun FilterListsScreen(
             )
         }
 
+        // Status message
+        if (statusMessage.isNotBlank()) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = DncSurfaceVariant)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (isLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                                color = DncCyan
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                        }
+                        Text(
+                            text = statusMessage,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = DncOnSurface
+                        )
+                    }
+                }
+            }
+        }
+
         // Filter Lists
         items(filterLists) { listInfo ->
-            var enabled by remember { mutableStateOf(listInfo.enabled) }
+            var enabled by remember(listInfo.id) { mutableStateOf(listInfo.enabled) }
+            var ruleCount by remember(listInfo.id) { mutableIntStateOf(listInfo.ruleCount) }
+
+            // Sync from engine when lists update
+            LaunchedEffect(filterLists) {
+                val current = filterEngine.getFilterLists().find { it.id == listInfo.id }
+                if (current != null) {
+                    enabled = current.enabled
+                    ruleCount = current.ruleCount
+                }
+            }
 
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -71,10 +124,10 @@ fun FilterListsScreen(
                             color = DncOnSurface
                         )
                         Text(
-                            text = "${listInfo.ruleCount} rules" +
+                            text = "${ruleCount} rules" +
                                     if (listInfo.lastUpdated > 0) " · Updated ${formatTimestamp(listInfo.lastUpdated)}" else "",
                             style = MaterialTheme.typography.bodySmall,
-                            color = DncOnSurfaceVariant,
+                            color = if (ruleCount > 0) DncGreen else DncOnSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -83,6 +136,31 @@ fun FilterListsScreen(
                         checked = enabled,
                         onCheckedChange = { newEnabled ->
                             enabled = newEnabled
+                            if (newEnabled) {
+                                // Actually download and activate the filter list
+                                isLoading = true
+                                statusMessage = "Downloading ${listInfo.name}..."
+                                kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+                                    val result = filterEngine.addFilterList(listInfo.id, listInfo.name, listInfo.url)
+                                    withContext(Dispatchers.Main) {
+                                        result.onSuccess { count ->
+                                            ruleCount = count
+                                            statusMessage = "Loaded $count rules from ${listInfo.name}"
+                                        }.onFailure { error ->
+                                            statusMessage = "Failed: ${error.message}"
+                                            enabled = false // Revert on failure
+                                        }
+                                        isLoading = false
+                                        filterLists = filterEngine.getFilterLists()
+                                    }
+                                }
+                            } else {
+                                // Remove the filter list rules
+                                filterEngine.removeFilterList(listInfo.id)
+                                ruleCount = 0
+                                filterLists = filterEngine.getFilterLists()
+                                statusMessage = "Removed ${listInfo.name}"
+                            }
                         },
                         colors = SwitchDefaults.colors(
                             checkedTrackColor = DncCyan,
@@ -127,7 +205,25 @@ fun FilterListsScreen(
                 IconButton(
                     onClick = {
                         if (newListUrl.isNotBlank()) {
+                            val url = newListUrl.trim()
                             newListUrl = ""
+                            isLoading = true
+                            statusMessage = "Downloading custom list..."
+                            kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+                                val id = "custom-${System.currentTimeMillis()}"
+                                val name = url.substringAfterLast("/").substringBefore(".")
+                                    .ifBlank { "Custom List" }
+                                val result = filterEngine.addFilterList(id, name, url)
+                                withContext(Dispatchers.Main) {
+                                    result.onSuccess { count ->
+                                        statusMessage = "Loaded $count rules from custom list"
+                                    }.onFailure { error ->
+                                        statusMessage = "Failed: ${error.message}"
+                                    }
+                                    isLoading = false
+                                    filterLists = filterEngine.getFilterLists()
+                                }
+                            }
                         }
                     }
                 ) {
@@ -177,6 +273,7 @@ fun FilterListsScreen(
                         if (newRuleText.isNotBlank()) {
                             filterEngine.addCustomRule(newRuleText)
                             newRuleText = ""
+                            customRules = filterEngine.getCustomRules()
                         }
                     }
                 ) {
@@ -207,7 +304,10 @@ fun FilterListsScreen(
                         overflow = TextOverflow.Ellipsis
                     )
                     IconButton(
-                        onClick = { filterEngine.removeCustomRule(rule.rawText) }
+                        onClick = {
+                            filterEngine.removeCustomRule(rule.rawText)
+                            customRules = filterEngine.getCustomRules()
+                        }
                     ) {
                         Icon(Icons.Filled.Delete, "Delete", tint = DncRed, modifier = Modifier.size(20.dp))
                     }
