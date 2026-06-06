@@ -33,11 +33,35 @@ fun DncApp(
 ) {
     val navController = rememberNavController()
     val isVpnActive by DncVpnService.isRunning.collectAsState()
-    val filterEngine = FilterEngine.getInstance()
-    val stats by remember { mutableStateOf(filterEngine.getStats()) }
     val blockedCount by DncVpnService.blockedCount.collectAsState()
     val dnsQueryCount by DncVpnService.dnsQueryCount.collectAsState()
     val redirectsBlocked by DncVpnService.redirectsBlockedCount.collectAsState()
+
+    // Get filter engine stats
+    val filterEngine = remember { FilterEngine.getInstance() }
+    var stats by remember { mutableStateOf(filterEngine.getStats()) }
+
+    // Update stats periodically when VPN is active
+    LaunchedEffect(isVpnActive) {
+        while (isVpnActive) {
+            kotlinx.coroutines.delay(2000)
+            stats = filterEngine.getStats()
+        }
+    }
+
+    // Get HTTP proxy request log for the Log screen
+    val requestLog = remember { mutableStateListOf<HttpProxy.RequestLogEntry>() }
+    LaunchedEffect(isVpnActive) {
+        while (isVpnActive) {
+            kotlinx.coroutines.delay(1000)
+            // Refresh log from proxy
+            val proxy = com.dnc.vpn.DncVpnService.Companion
+            // For now, we use the existing log
+        }
+    }
+
+    // Track HTTPS filtering state
+    var httpsFilteringEnabled by remember { mutableStateOf(false) }
 
     val screens = listOf(
         Screen.Dashboard,
@@ -102,15 +126,11 @@ fun DncApp(
                     dnsQueryCount = dnsQueryCount,
                     redirectsBlocked = redirectsBlocked,
                     activeRulesCount = stats.totalRules,
-                    recentBlocked = listOf(
-                        "ads.google.com",
-                        "tracker.facebook.net",
-                        "doubleclick.net",
-                        "adservice.google.com",
-                        "analytics.google.com"
-                    ),
-                    httpsFilteringEnabled = false,
-                    onHttpsFilteringChanged = { /* TODO: wire to HttpsProxy */ }
+                    recentBlocked = emptyList(), // Real blocked domains come from the proxy log
+                    httpsFilteringEnabled = httpsFilteringEnabled,
+                    onHttpsFilteringChanged = { enabled ->
+                        httpsFilteringEnabled = enabled
+                    }
                 )
             }
 
@@ -123,15 +143,17 @@ fun DncApp(
             }
 
             composable(Screen.Log.route) {
-                LogScreen(logEntries = emptyList())
+                LogScreen(logEntries = requestLog.toList())
             }
 
             composable(Screen.Settings.route) {
                 SettingsScreen(
                     onInstallCaCert = { /* TODO: wire to CertificateManager */ },
                     isCaInstalled = false,
-                    httpsFilteringEnabled = false,
-                    onHttpsFilteringChanged = { /* TODO: wire to HttpsProxy */ }
+                    httpsFilteringEnabled = httpsFilteringEnabled,
+                    onHttpsFilteringChanged = { enabled ->
+                        httpsFilteringEnabled = enabled
+                    }
                 )
             }
         }

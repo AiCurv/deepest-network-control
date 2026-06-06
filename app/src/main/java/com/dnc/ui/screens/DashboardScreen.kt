@@ -110,7 +110,7 @@ fun DashboardScreen(
                 title = "DNS Filtering",
                 subtitle = "Block domains at DNS level",
                 icon = Icons.Filled.Dns,
-                checked = dnsEnabled,
+                checked = dnsEnabled && isVpnActive,
                 onCheckedChange = { dnsEnabled = it }
             )
         }
@@ -138,26 +138,6 @@ fun DashboardScreen(
             )
         }
 
-        item {
-            ToggleCard(
-                title = "Cosmetic Filtering",
-                subtitle = "Hide page elements with CSS (##selector rules)",
-                icon = Icons.Filled.VisibilityOff,
-                checked = true,
-                onCheckedChange = { /* cosmetic filtering is always on when MITM is active */ }
-            )
-        }
-
-        item {
-            ToggleCard(
-                title = "Scriptlet Injection",
-                subtitle = "Inject JS to neutralize trackers & anti-adblock",
-                icon = Icons.Filled.Code,
-                checked = true,
-                onCheckedChange = { /* scriptlets are always on when MITM is active */ }
-            )
-        }
-
         // Recent Blocked
         if (recentBlocked.isNotEmpty()) {
             item {
@@ -171,6 +151,43 @@ fun DashboardScreen(
 
             items(recentBlocked.take(10)) { domain ->
                 BlockedItem(domain = domain)
+            }
+        }
+
+        // Empty state when VPN is active but no blocks yet
+        if (isVpnActive && blockedCount == 0 && recentBlocked.isEmpty()) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = DncSurfaceVariant)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.CheckCircle,
+                            contentDescription = null,
+                            tint = DncGreen,
+                            modifier = Modifier.size(40.dp)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "Network protection active",
+                            fontWeight = FontWeight.SemiBold,
+                            color = DncGreen,
+                            fontSize = 16.sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Browsing is protected. Blocked domains will appear here.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = DncOnSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        )
+                    }
+                }
             }
         }
     }
@@ -191,9 +208,6 @@ private fun ShieldToggle(
         ),
         label = "pulseAlpha"
     )
-
-    val shieldColor = if (isActive) DncGreen else DncRed
-    val backgroundColor = if (isActive) DncGreen.copy(alpha = 0.15f) else DncSurfaceVariant
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -364,5 +378,3 @@ private fun BlockedItem(domain: String) {
         )
     }
 }
-
-

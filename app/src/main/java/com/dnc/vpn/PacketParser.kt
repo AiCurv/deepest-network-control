@@ -177,7 +177,7 @@ object PacketParser {
         udpHeader.putShort(sourcePort.toShort())
         udpHeader.putShort(destPort.toShort())
         udpHeader.putShort(udpLength.toShort())
-        udpHeader.putShort(0) // checksum (0 = disabled)
+        udpHeader.putShort(0) // checksum (0 = disabled for IPv4)
 
         val udpData = ByteArray(udpLength)
         System.arraycopy(udpHeader.array(), 0, udpData, 0, 8)
@@ -264,6 +264,197 @@ object PacketParser {
 
         System.arraycopy(tcpBuffer.array(), 0, ipArray, 20, tcpHeaderSize)
 
+        // Compute TCP checksum
+        val tcpChecksum = computeTcpChecksum(sourceIp, destIp, ipArray, 20, tcpHeaderSize)
+        ipArray[36] = (tcpChecksum shr 8).toByte()
+        ipArray[37] = (tcpChecksum and 0xFF).toByte()
+
+        return ipArray
+    }
+
+    // ========== Build TCP ACK Packet ==========
+
+    fun buildTcpAck(
+        sourceIp: ByteArray,
+        destIp: ByteArray,
+        sourcePort: Int,
+        destPort: Int,
+        seqNum: Long,
+        ackNum: Long,
+        ipPacketId: Int = 0
+    ): ByteArray {
+        val tcpHeaderSize = 20
+        val totalLength = 20 + tcpHeaderSize
+        val ipBuffer = ByteBuffer.allocate(totalLength)
+
+        // IP header
+        ipBuffer.put((0x45).toByte())
+        ipBuffer.put(0)
+        ipBuffer.putShort(totalLength.toShort())
+        ipBuffer.putShort(ipPacketId.toShort())
+        ipBuffer.putShort(0x4000.toShort())
+        ipBuffer.put(64.toByte())
+        ipBuffer.put(PROTOCOL_TCP.toByte())
+        ipBuffer.putShort(0) // checksum placeholder
+        ipBuffer.put(sourceIp)
+        ipBuffer.put(destIp)
+
+        val ipArray = ipBuffer.array()
+        val ipChecksum = computeChecksum(ipArray, 0, 20)
+        ipArray[10] = (ipChecksum shr 8).toByte()
+        ipArray[11] = (ipChecksum and 0xFF).toByte()
+
+        // TCP header
+        val tcpBuffer = ByteBuffer.allocate(tcpHeaderSize)
+        tcpBuffer.putShort(sourcePort.toShort())
+        tcpBuffer.putShort(destPort.toShort())
+        tcpBuffer.putInt((seqNum and 0xFFFFFFFFL).toInt())
+        tcpBuffer.putInt((ackNum and 0xFFFFFFFFL).toInt())
+        tcpBuffer.put((5 shl 4).toByte()) // data offset = 5 (20 bytes)
+        tcpBuffer.put(TcpPacket.FLAG_ACK.toByte())
+        tcpBuffer.putShort(65535.toShort()) // window
+        tcpBuffer.putShort(0) // checksum placeholder
+        tcpBuffer.putShort(0) // urgent pointer
+
+        System.arraycopy(tcpBuffer.array(), 0, ipArray, 20, tcpHeaderSize)
+
+        // Compute TCP checksum
+        val tcpChecksum = computeTcpChecksum(sourceIp, destIp, ipArray, 20, tcpHeaderSize)
+        ipArray[34] = (tcpChecksum shr 8).toByte()
+        ipArray[35] = (tcpChecksum and 0xFF).toByte()
+
+        return ipArray
+    }
+
+    // ========== Build TCP Data Packet ==========
+
+    fun buildTcpDataPacket(
+        sourceIp: ByteArray,
+        destIp: ByteArray,
+        sourcePort: Int,
+        destPort: Int,
+        seqNum: Long,
+        ackNum: Long,
+        payload: ByteArray,
+        flags: Int = TcpPacket.FLAG_ACK or TcpPacket.FLAG_PSH,
+        ipPacketId: Int = 0
+    ): ByteArray {
+        val tcpHeaderSize = 20
+        val totalLength = 20 + tcpHeaderSize + payload.size
+        val ipBuffer = ByteBuffer.allocate(totalLength)
+
+        // IP header
+        ipBuffer.put((0x45).toByte())
+        ipBuffer.put(0)
+        ipBuffer.putShort(totalLength.toShort())
+        ipBuffer.putShort(ipPacketId.toShort())
+        ipBuffer.putShort(0x4000.toShort())
+        ipBuffer.put(64.toByte())
+        ipBuffer.put(PROTOCOL_TCP.toByte())
+        ipBuffer.putShort(0) // checksum placeholder
+        ipBuffer.put(sourceIp)
+        ipBuffer.put(destIp)
+
+        val ipArray = ipBuffer.array()
+        val ipChecksum = computeChecksum(ipArray, 0, 20)
+        ipArray[10] = (ipChecksum shr 8).toByte()
+        ipArray[11] = (ipChecksum and 0xFF).toByte()
+
+        // TCP header
+        val tcpBuffer = ByteBuffer.allocate(tcpHeaderSize)
+        tcpBuffer.putShort(sourcePort.toShort())
+        tcpBuffer.putShort(destPort.toShort())
+        tcpBuffer.putInt((seqNum and 0xFFFFFFFFL).toInt())
+        tcpBuffer.putInt((ackNum and 0xFFFFFFFFL).toInt())
+        tcpBuffer.put((5 shl 4).toByte()) // data offset = 5 (20 bytes)
+        tcpBuffer.put(flags.toByte())
+        tcpBuffer.putShort(65535.toShort()) // window
+        tcpBuffer.putShort(0) // checksum placeholder
+        tcpBuffer.putShort(0) // urgent pointer
+
+        System.arraycopy(tcpBuffer.array(), 0, ipArray, 20, tcpHeaderSize)
+
+        // TCP payload
+        if (payload.isNotEmpty()) {
+            System.arraycopy(payload, 0, ipArray, 20 + tcpHeaderSize, payload.size)
+        }
+
+        // Compute TCP checksum
+        val tcpChecksum = computeTcpChecksum(sourceIp, destIp, ipArray, 20, tcpHeaderSize + payload.size)
+        ipArray[34] = (tcpChecksum shr 8).toByte()
+        ipArray[35] = (tcpChecksum and 0xFF).toByte()
+
+        return ipArray
+    }
+
+    // ========== Build TCP FIN Packet ==========
+
+    fun buildTcpFin(
+        sourceIp: ByteArray,
+        destIp: ByteArray,
+        sourcePort: Int,
+        destPort: Int,
+        seqNum: Long,
+        ackNum: Long,
+        ipPacketId: Int = 0
+    ): ByteArray {
+        return buildTcpDataPacket(
+            sourceIp, destIp, sourcePort, destPort,
+            seqNum, ackNum, ByteArray(0),
+            flags = TcpPacket.FLAG_FIN or TcpPacket.FLAG_ACK,
+            ipPacketId = ipPacketId
+        )
+    }
+
+    // ========== Build TCP RST Packet ==========
+
+    fun buildTcpRst(
+        sourceIp: ByteArray,
+        destIp: ByteArray,
+        sourcePort: Int,
+        destPort: Int,
+        seqNum: Long,
+        ipPacketId: Int = 0
+    ): ByteArray {
+        val tcpHeaderSize = 20
+        val totalLength = 20 + tcpHeaderSize
+        val ipBuffer = ByteBuffer.allocate(totalLength)
+
+        // IP header
+        ipBuffer.put((0x45).toByte())
+        ipBuffer.put(0)
+        ipBuffer.putShort(totalLength.toShort())
+        ipBuffer.putShort(ipPacketId.toShort())
+        ipBuffer.putShort(0x4000.toShort())
+        ipBuffer.put(64.toByte())
+        ipBuffer.put(PROTOCOL_TCP.toByte())
+        ipBuffer.putShort(0)
+        ipBuffer.put(sourceIp)
+        ipBuffer.put(destIp)
+
+        val ipArray = ipBuffer.array()
+        val ipChecksum = computeChecksum(ipArray, 0, 20)
+        ipArray[10] = (ipChecksum shr 8).toByte()
+        ipArray[11] = (ipChecksum and 0xFF).toByte()
+
+        // TCP header
+        val tcpBuffer = ByteBuffer.allocate(tcpHeaderSize)
+        tcpBuffer.putShort(sourcePort.toShort())
+        tcpBuffer.putShort(destPort.toShort())
+        tcpBuffer.putInt((seqNum and 0xFFFFFFFFL).toInt())
+        tcpBuffer.putInt(0)
+        tcpBuffer.put((5 shl 4).toByte())
+        tcpBuffer.put(TcpPacket.FLAG_RST.toByte())
+        tcpBuffer.putShort(0)
+        tcpBuffer.putShort(0)
+        tcpBuffer.putShort(0)
+
+        System.arraycopy(tcpBuffer.array(), 0, ipArray, 20, tcpHeaderSize)
+
+        val tcpChecksum = computeTcpChecksum(sourceIp, destIp, ipArray, 20, tcpHeaderSize)
+        ipArray[34] = (tcpChecksum shr 8).toByte()
+        ipArray[35] = (tcpChecksum and 0xFF).toByte()
+
         return ipArray
     }
 
@@ -282,6 +473,56 @@ object PacketParser {
 
         if (remaining == 1) {
             sum += (data[i].toInt() and 0xFF) shl 8
+        }
+
+        while (sum shr 16 != 0L) {
+            sum = (sum and 0xFFFF) + (sum shr 16)
+        }
+
+        return (sum.toInt().inv()) and 0xFFFF
+    }
+
+    // ========== Compute TCP Checksum with Pseudo-Header ==========
+
+    private fun computeTcpChecksum(
+        sourceIp: ByteArray,
+        destIp: ByteArray,
+        packet: ByteArray,
+        tcpOffset: Int,
+        tcpLength: Int
+    ): Int {
+        var sum = 0L
+
+        // Pseudo-header: source IP + dest IP + zero + protocol + TCP length
+        for (i in sourceIp.indices) {
+            sum += if (i % 2 == 0) {
+                ((sourceIp[i].toInt() and 0xFF) shl 8)
+            } else {
+                (sourceIp[i].toInt() and 0xFF)
+            }
+        }
+        for (i in destIp.indices) {
+            sum += if (i % 2 == 0) {
+                ((destIp[i].toInt() and 0xFF) shl 8)
+            } else {
+                (destIp[i].toInt() and 0xFF)
+            }
+        }
+        sum += PROTOCOL_TCP.toLong() // protocol
+        sum += tcpLength.toLong() // TCP length
+
+        // TCP header + data
+        var i = tcpOffset
+        var remaining = tcpLength
+        while (remaining > 1) {
+            if (i + 1 < packet.size) {
+                sum += ((packet[i].toInt() and 0xFF) shl 8) or (packet[i + 1].toInt() and 0xFF)
+            }
+            i += 2
+            remaining -= 2
+        }
+        if (remaining == 1 && i < packet.size) {
+            sum += (packet[i].toInt() and 0xFF) shl 8
         }
 
         while (sum shr 16 != 0L) {
