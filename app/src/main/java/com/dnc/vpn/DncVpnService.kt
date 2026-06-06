@@ -26,16 +26,18 @@ import java.nio.ByteBuffer
 /**
  * Core VPN Service for Deepest Network Control.
  *
- * ARCHITECTURE (FIXED):
+ * ARCHITECTURE:
  * 1. TUN interface captures ALL device traffic
  * 2. DNS queries (UDP/53) → DnsInterceptor (async, non-blocking)
  * 3. TCP connections → TcpRelay (protected sockets to real servers)
  * 4. Other UDP → Forward via protected DatagramSocket
- * 5. Everything is properly forwarded — no traffic is silently dropped
+ * 5. DNS blocking is the PRIMARY filtering mechanism (blocks entire domains)
  *
- * The VPN acts as a NAT-based proxy: apps send packets to TUN,
- * we relay them to real servers using protected sockets, and
- * write the responses back to TUN.
+ * CRITICAL FIXES in this version:
+ * - Multiple DNS servers configured so Android always has a working resolver
+ * - DNS interceptor started BEFORE VPN interface to avoid race conditions
+ * - Protected socket error handling improved
+ * - HTTP proxy integration for port 80 traffic
  */
 class DncVpnService : VpnService() {
 
@@ -103,10 +105,28 @@ class DncVpnService : VpnService() {
         startForeground(NOTIFICATION_ID, notification)
 
         try {
+            // Initialize FilterEngine if needed
+            try {
+                FilterEngine.init(this)
+            } catch (_: Exception) {}
+
+            // Start DNS interceptor BEFORE establishing VPN interface
+            // This avoids a race condition where Android sends DNS queries
+            // before our interceptor is ready
+            dnsInterceptor.start()
+            httpProxy.start()
+            httpsProxy.setHttpProxy(httpProxy)
+            httpsProxy.start()
+
             val builder = Builder()
             builder.addAddress(VPN_ADDRESS, 24)
             builder.addRoute(VPN_ROUTE, 0)
+            // Primary DNS is the VPN gateway — our interceptor handles it
             builder.addDnsServer(VPN_DNS)
+            // Also add real upstream DNS servers so Android has alternatives
+            // These queries will also come through the TUN and be intercepted
+            builder.addDnsServer("1.1.1.1")
+            builder.addDnsServer("8.8.8.8")
             builder.setSession("DNC")
             builder.setMtu(VPN_MTU)
             builder.setBlocking(true)
@@ -115,27 +135,17 @@ class DncVpnService : VpnService() {
 
             if (vpnInterface == null) {
                 Log.e(TAG, "Failed to establish VPN interface")
-                stopSelf()
+                stopVpn()
                 return
             }
 
             vpnRunning = true
             _isRunning.value = true
 
-            // Initialize FilterEngine if needed
-            try {
-                FilterEngine.init(this)
-            } catch (_: Exception) {}
-
-            dnsInterceptor.start()
-            httpProxy.start()
-            httpsProxy.setHttpProxy(httpProxy)
-            httpsProxy.start()
-
             vpnThread = Thread { processPackets() }
             vpnThread?.start()
 
-            Log.i(TAG, "DNC VPN started successfully")
+            Log.i(TAG, "DNC VPN started successfully with DNS: $VPN_DNS, 1.1.1.1, 8.8.8.8")
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start VPN: ${e.message}", e)
@@ -179,13 +189,6 @@ class DncVpnService : VpnService() {
 
     /**
      * Main packet processing loop.
-     *
-     * Reads packets from the TUN interface, routes them to the
-     * appropriate handler, and writes responses back.
-     *
-     * CRITICAL: DNS forwarding is now ASYNC so it doesn't block
-     * this loop. TCP connections use protected sockets with
-     * background relay threads.
      */
     private fun processPackets() {
         val fileDescriptor = vpnInterface?.fileDescriptor ?: return
@@ -222,14 +225,14 @@ class DncVpnService : VpnService() {
     /**
      * Handle UDP packets — DNS and other UDP traffic.
      *
-     * DNS queries are forwarded ASYNCHRONOUSLY to avoid blocking
-     * the packet processing loop. Other UDP traffic is forwarded
-     * via a protected DatagramSocket.
+     * DNS queries to ANY destination IP are intercepted and handled.
+     * We don't just handle queries to 10.0.0.1 — Android may also send
+     * queries to 1.1.1.1 or 8.8.8.8 (configured as backup DNS servers).
      */
     private fun handleUdpPacket(ipPacket: PacketParser.IpPacket, outputStream: FileOutputStream) {
         val udpPacket = PacketParser.parseUdpPacket(ipPacket.payload) ?: return
 
-        // Port 53 = DNS
+        // Port 53 = DNS — handle ALL DNS queries regardless of destination IP
         if (udpPacket.destinationPort == 53) {
             _dnsQueryCount.value += 1
 
@@ -258,6 +261,8 @@ class DncVpnService : VpnService() {
                             Log.w(TAG, "Error writing async DNS response: ${e.message}")
                         }
                     }
+                } else {
+                    Log.w(TAG, "DNS async response was null for query")
                 }
             }
 
@@ -295,32 +300,29 @@ class DncVpnService : VpnService() {
     }
 
     /**
-     * Handle ICMP packets — forward via protected socket.
-     * (Minimal implementation — just drop for now as ICMP relay
-     * through raw sockets requires root)
+     * Handle ICMP packets — drop silently.
      */
     private fun handleIcmpPacket(ipPacket: PacketParser.IpPacket, outputStream: FileOutputStream) {
         // ICMP relay requires raw sockets which need root
-        // For now, we silently drop ICMP packets
-        // This means ping won't work through the VPN, but web browsing will
     }
 
     /**
      * Forward UDP packets (non-DNS) using a protected DatagramSocket.
-     *
-     * This handles things like QUIC (UDP/443), STUN, etc.
      */
     private fun forwardUdpPacket(
         ipPacket: PacketParser.IpPacket,
         udpPacket: PacketParser.UdpPacket,
         outputStream: FileOutputStream
     ) {
-        // Forward UDP asynchronously to avoid blocking
         Thread {
             var socket: DatagramSocket? = null
             try {
                 socket = DatagramSocket()
-                protectSocket(socket)
+                val protected = protectSocket(socket)
+                if (!protected) {
+                    Log.e(TAG, "Failed to protect UDP socket — dropping packet")
+                    return@Thread
+                }
                 socket.soTimeout = 5000
 
                 val serverAddress = InetAddress.getByAddress(ipPacket.destinationAddress)
@@ -364,11 +366,21 @@ class DncVpnService : VpnService() {
     }
 
     fun protectSocket(socket: java.net.Socket): Boolean {
-        return protect(socket)
+        return try {
+            protect(socket)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to protect socket: ${e.message}")
+            false
+        }
     }
 
     fun protectSocket(socket: DatagramSocket): Boolean {
-        return protect(socket)
+        return try {
+            protect(socket)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to protect datagram socket: ${e.message}")
+            false
+        }
     }
 
     fun incrementBlocked() {

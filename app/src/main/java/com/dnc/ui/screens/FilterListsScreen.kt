@@ -31,12 +31,17 @@ fun FilterListsScreen(
     var isLoading by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf("") }
 
+    // Use rememberCoroutineScope for safe coroutine management
+    val coroutineScope = rememberCoroutineScope()
+
     // Refresh list data periodically
     LaunchedEffect(Unit) {
         while (true) {
-            filterLists = filterEngine.getFilterLists()
-            customRules = filterEngine.getCustomRules()
-            kotlinx.coroutines.delay(2000)
+            try {
+                filterLists = filterEngine.getFilterLists()
+                customRules = filterEngine.getCustomRules()
+            } catch (_: Exception) {}
+            kotlinx.coroutines.delay(3000)
         }
     }
 
@@ -138,29 +143,41 @@ fun FilterListsScreen(
                         onCheckedChange = { newEnabled ->
                             enabled = newEnabled
                             if (newEnabled) {
-                                // Actually download and activate the filter list
+                                // Download and activate the filter list
                                 isLoading = true
                                 statusMessage = "Downloading ${listInfo.name}..."
-                                kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
-                                    val result = filterEngine.addFilterList(listInfo.id, listInfo.name, listInfo.url)
-                                    withContext(Dispatchers.Main) {
-                                        result.onSuccess { count ->
-                                            ruleCount = count
-                                            statusMessage = "Loaded $count rules from ${listInfo.name}"
-                                        }.onFailure { error ->
-                                            statusMessage = "Failed: ${error.message}"
-                                            enabled = false // Revert on failure
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    try {
+                                        val result = filterEngine.addFilterList(listInfo.id, listInfo.name, listInfo.url)
+                                        withContext(Dispatchers.Main) {
+                                            result.onSuccess { count ->
+                                                ruleCount = count
+                                                statusMessage = "Loaded $count rules from ${listInfo.name}"
+                                            }.onFailure { error ->
+                                                statusMessage = "Failed: ${error.message}"
+                                                enabled = false // Revert on failure
+                                            }
+                                            isLoading = false
+                                            filterLists = filterEngine.getFilterLists()
                                         }
-                                        isLoading = false
-                                        filterLists = filterEngine.getFilterLists()
+                                    } catch (e: Exception) {
+                                        withContext(Dispatchers.Main) {
+                                            statusMessage = "Error: ${e.message}"
+                                            enabled = false
+                                            isLoading = false
+                                        }
                                     }
                                 }
                             } else {
                                 // Remove the filter list rules
-                                filterEngine.removeFilterList(listInfo.id)
-                                ruleCount = 0
-                                filterLists = filterEngine.getFilterLists()
-                                statusMessage = "Removed ${listInfo.name}"
+                                try {
+                                    filterEngine.removeFilterList(listInfo.id)
+                                    ruleCount = 0
+                                    filterLists = filterEngine.getFilterLists()
+                                    statusMessage = "Removed ${listInfo.name}"
+                                } catch (e: Exception) {
+                                    statusMessage = "Error removing: ${e.message}"
+                                }
                             }
                         },
                         colors = SwitchDefaults.colors(
@@ -210,19 +227,26 @@ fun FilterListsScreen(
                             newListUrl = ""
                             isLoading = true
                             statusMessage = "Downloading custom list..."
-                            kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
-                                val id = "custom-${System.currentTimeMillis()}"
-                                val name = url.substringAfterLast("/").substringBefore(".")
-                                    .ifBlank { "Custom List" }
-                                val result = filterEngine.addFilterList(id, name, url)
-                                withContext(Dispatchers.Main) {
-                                    result.onSuccess { count ->
-                                        statusMessage = "Loaded $count rules from custom list"
-                                    }.onFailure { error ->
-                                        statusMessage = "Failed: ${error.message}"
+                            coroutineScope.launch(Dispatchers.IO) {
+                                try {
+                                    val id = "custom-${System.currentTimeMillis()}"
+                                    val name = url.substringAfterLast("/").substringBefore(".")
+                                        .ifBlank { "Custom List" }
+                                    val result = filterEngine.addFilterList(id, name, url)
+                                    withContext(Dispatchers.Main) {
+                                        result.onSuccess { count ->
+                                            statusMessage = "Loaded $count rules from custom list"
+                                        }.onFailure { error ->
+                                            statusMessage = "Failed: ${error.message}"
+                                        }
+                                        isLoading = false
+                                        filterLists = filterEngine.getFilterLists()
                                     }
-                                    isLoading = false
-                                    filterLists = filterEngine.getFilterLists()
+                                } catch (e: Exception) {
+                                    withContext(Dispatchers.Main) {
+                                        statusMessage = "Error: ${e.message}"
+                                        isLoading = false
+                                    }
                                 }
                             }
                         }
@@ -272,9 +296,19 @@ fun FilterListsScreen(
                 IconButton(
                     onClick = {
                         if (newRuleText.isNotBlank()) {
-                            filterEngine.addCustomRule(newRuleText)
-                            newRuleText = ""
-                            customRules = filterEngine.getCustomRules()
+                            try {
+                                val rule = filterEngine.addCustomRule(newRuleText)
+                                if (rule != null) {
+                                    statusMessage = "Rule added: ${newRuleText.trim()}"
+                                } else {
+                                    statusMessage = "Invalid rule syntax — check format"
+                                }
+                                newRuleText = ""
+                                customRules = filterEngine.getCustomRules()
+                            } catch (e: Exception) {
+                                statusMessage = "Error adding rule: ${e.message}"
+                                newRuleText = ""
+                            }
                         }
                     }
                 ) {
@@ -306,8 +340,10 @@ fun FilterListsScreen(
                     )
                     IconButton(
                         onClick = {
-                            filterEngine.removeCustomRule(rule.rawText)
-                            customRules = filterEngine.getCustomRules()
+                            try {
+                                filterEngine.removeCustomRule(rule.rawText)
+                                customRules = filterEngine.getCustomRules()
+                            } catch (_: Exception) {}
                         }
                     ) {
                         Icon(Icons.Filled.Delete, "Delete", tint = DncRed, modifier = Modifier.size(20.dp))

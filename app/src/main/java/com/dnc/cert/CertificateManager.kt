@@ -486,18 +486,55 @@ class CertificateManager private constructor(private val context: Context) {
     }
 
     /**
-     * Trigger the Android certificate installation flow
-     * On Android 11+, this may redirect to manual Settings installation
+     * Trigger the Android certificate installation flow.
+     * 
+     * On Android 9 and below: Uses android.credentials.INSTALL intent
+     * On Android 10+: Uses KeyChain.createInstallIntent()
+     * On Android 11+: Opens Security Settings for manual install
+     * 
+     * The cert is also exported as PEM to the app's cache so users can
+     * manually install it if the intent approach doesn't work.
      */
     fun installCaCertificate() {
         try {
-            val certDer = exportCaCertificateDer() ?: return
+            val certDer = exportCaCertificateDer()
+            if (certDer == null) {
+                Log.e(TAG, "No CA certificate to install — generate first")
+                return
+            }
 
-            // Write cert to a temporary file
+            // Always export PEM too for manual installation
+            val pemData = exportCaCertificatePem()
+            if (pemData != null) {
+                val pemFile = File(context.cacheDir, "dnc_ca_cert.pem")
+                FileOutputStream(pemFile).use { it.write(pemData.toByteArray()) }
+                Log.i(TAG, "PEM cert exported to: ${pemFile.absolutePath}")
+            }
+
+            // Write DER cert to cache
             val certFile = File(context.cacheDir, "dnc_ca_cert.crt")
             FileOutputStream(certFile).use { it.write(certDer) }
+            Log.i(TAG, "DER cert exported to: ${certFile.absolutePath}")
 
-            // Try the standard install intent (works on Android 7-10)
+            // Try multiple installation methods in order of preference
+
+            // Method 1: KeyChain install intent (works on most Android versions)
+            try {
+                val installIntent = android.security.KeyChain.createInstallIntent()
+                installIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                installIntent.putExtra("name", "$CA_COMMON_NAME - $CA_ORGANIZATION")
+                installIntent.setDataAndType(
+                    Uri.fromFile(certFile),
+                    "application/x-x509-ca-cert"
+                )
+                context.startActivity(installIntent)
+                Log.i(TAG, "CA certificate install intent triggered via KeyChain")
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "KeyChain install intent failed: ${e.message}")
+            }
+
+            // Method 2: Direct credentials intent (older Android)
             try {
                 val intent = Intent("android.credentials.INSTALL")
                 intent.putExtra("name", "$CA_COMMON_NAME - $CA_ORGANIZATION")
@@ -507,18 +544,37 @@ class CertificateManager private constructor(private val context: Context) {
                 )
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 context.startActivity(intent)
-                Log.i(TAG, "CA certificate install intent triggered")
+                Log.i(TAG, "CA certificate install intent triggered via credentials")
+                return
             } catch (e: Exception) {
-                // On Android 11+, the direct intent doesn't work
-                // Try the Settings approach
-                Log.w(TAG, "Direct install intent failed, trying Settings: ${e.message}")
-                try {
-                    val settingsIntent = Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS)
-                    settingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    context.startActivity(settingsIntent)
-                } catch (e2: Exception) {
-                    Log.e(TAG, "Cannot open security settings: ${e2.message}")
-                }
+                Log.w(TAG, "Direct credentials intent failed: ${e.message}")
+            }
+
+            // Method 3: Install as PEM (some devices prefer this)
+            try {
+                val pemFile = File(context.cacheDir, "dnc_ca_cert.pem")
+                val intent = Intent("android.credentials.INSTALL")
+                intent.putExtra("name", "$CA_COMMON_NAME - $CA_ORGANIZATION")
+                intent.setDataAndType(
+                    Uri.fromFile(pemFile),
+                    "application/x-x509-ca-cert"
+                )
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+                Log.i(TAG, "CA certificate install intent triggered via PEM")
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "PEM install intent failed: ${e.message}")
+            }
+
+            // Method 4: Open Security Settings for manual install
+            try {
+                val settingsIntent = Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS)
+                settingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(settingsIntent)
+                Log.i(TAG, "Opened Security Settings for manual CA install")
+            } catch (e2: Exception) {
+                Log.e(TAG, "Cannot open security settings: ${e2.message}")
             }
 
         } catch (e: Exception) {

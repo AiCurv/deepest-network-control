@@ -14,8 +14,11 @@ import java.util.concurrent.atomic.AtomicInteger
  * the blocklist, and either returns a blocked response or forwards
  * to the upstream DNS server ASYNCHRONOUSLY.
  *
- * CRITICAL FIX: DNS forwarding is now async so it doesn't block
- * the VPN packet processing loop.
+ * CRITICAL FIXES:
+ * - Protected socket return value is checked
+ * - Error handling ensures the callback is ALWAYS called
+ * - DNS queries to ANY destination IP are handled (not just 10.0.0.1)
+ * - Fallback DNS servers if primary fails
  */
 class DnsInterceptor(private val vpnService: DncVpnService) {
 
@@ -26,6 +29,14 @@ class DnsInterceptor(private val vpnService: DncVpnService) {
         private const val DEFAULT_CACHE_SIZE = 1000
         private const val CACHE_TTL_OVERRIDE = 0 // 0 = use original TTL
         private const val DNS_TIMEOUT_MS = 8000L
+        private const val MAX_RETRIES = 2
+
+        // Fallback DNS servers to try if primary fails
+        private val FALLBACK_DNS = listOf(
+            "1.1.1.1" to 53,   // Cloudflare
+            "8.8.8.8" to 53,   // Google
+            "9.9.9.9" to 53    // Quad9
+        )
     }
 
     // DNS record types
@@ -94,9 +105,8 @@ class DnsInterceptor(private val vpnService: DncVpnService) {
      * Returns the DNS response bytes synchronously if cached/blocked,
      * or null if the query needs async forwarding (caller should not wait).
      *
-     * @param onAsyncResponse Called when an async DNS response is available
-     *                        (from a separate thread). The callback receives
-     *                        the raw DNS response bytes.
+     * IMPORTANT: The onAsyncResponse callback is ALWAYS called (even on error)
+     * so the caller knows when the operation is complete.
      */
     fun handleQueryAsync(
         queryData: ByteArray,
@@ -105,9 +115,17 @@ class DnsInterceptor(private val vpnService: DncVpnService) {
         sourcePort: Int,
         onAsyncResponse: (ByteArray?) -> Unit
     ): ByteArray? {
-        if (!isRunning) return null
+        if (!isRunning) {
+            Log.w(TAG, "DNS interceptor not running, returning null")
+            return null
+        }
 
-        val query = parseDnsQuery(queryData) ?: return null
+        val query = parseDnsQuery(queryData)
+        if (query == null) {
+            Log.w(TAG, "Failed to parse DNS query, forwarding raw")
+            forwardQueryAsync(queryData, onAsyncResponse)
+            return null
+        }
 
         _stats.totalQueries += 1
         vpnService.incrementDnsQuery()
@@ -127,6 +145,7 @@ class DnsInterceptor(private val vpnService: DncVpnService) {
             val response = cached.response.copyOf()
             response[0] = (query.header.id shr 8).toByte()
             response[1] = (query.header.id and 0xFF).toByte()
+            Log.d(TAG, "CACHE HIT: $domain")
             return response
         }
 
@@ -142,59 +161,20 @@ class DnsInterceptor(private val vpnService: DncVpnService) {
 
         // Forward to upstream ASYNCHRONOUSLY — don't block the packet loop
         _stats.forwarded += 1
+        Log.d(TAG, "FORWARDING DNS query: $domain -> ${upstreamDns.serverIp}")
         forwardQueryAsync(queryData) { responseBytes ->
             if (responseBytes != null) {
                 // Cache the response
                 cacheResponse(cacheKey, responseBytes)
+                Log.d(TAG, "DNS response received for: $domain")
+            } else {
+                Log.w(TAG, "DNS forward failed for: $domain")
             }
-            onAsyncResponse(responseBytes ?: return@forwardQueryAsync)
+            // ALWAYS call the callback so the caller knows we're done
+            onAsyncResponse(responseBytes)
         }
 
         return null // Response will come via callback
-    }
-
-    /**
-     * Legacy synchronous method for compatibility.
-     * Returns the DNS response bytes, or null if we can't handle it.
-     */
-    fun handleQuery(queryData: ByteArray, destIp: ByteArray): ByteArray? {
-        if (!isRunning) return null
-
-        val query = parseDnsQuery(queryData) ?: return null
-
-        _stats.totalQueries += 1
-
-        val domain = query.questions.firstOrNull()?.domainName ?: return forwardQuery(queryData)
-
-        // Check cache first
-        val cacheKey = "${domain}:${query.questions.firstOrNull()?.type ?: RecordType.A}"
-        val cached = cache[cacheKey]
-        if (cached != null && cached.expiryTime > System.currentTimeMillis()) {
-            _stats.cached += 1
-            val response = cached.response.copyOf()
-            response[0] = (query.header.id shr 8).toByte()
-            response[1] = (query.header.id and 0xFF).toByte()
-            return response
-        }
-
-        // Check against filter engine
-        val shouldBlock = shouldBlockDomain(domain)
-
-        if (shouldBlock) {
-            _stats.blocked += 1
-            vpnService.incrementBlocked()
-            Log.d(TAG, "BLOCKED DNS query: $domain")
-            return buildBlockedResponse(query)
-        }
-
-        // Forward to upstream
-        _stats.forwarded += 1
-        val response = forwardQuery(queryData) ?: return null
-
-        // Cache the response
-        cacheResponse(cacheKey, response)
-
-        return response
     }
 
     private fun shouldBlockDomain(domain: String): Boolean {
@@ -204,61 +184,59 @@ class DnsInterceptor(private val vpnService: DncVpnService) {
 
     /**
      * Forward the DNS query to the upstream DNS server ASYNCHRONOUSLY.
-     * Calls the callback on a background thread.
+     * Tries fallback servers if the primary fails.
+     * ALWAYS calls the callback (even on failure, with null).
      */
     private fun forwardQueryAsync(
         queryData: ByteArray,
         callback: (ByteArray?) -> Unit
     ) {
         Thread {
-            try {
-                val socket = DatagramSocket()
-                try {
-                    vpnService.protectSocket(socket)
-                    socket.soTimeout = DNS_TIMEOUT_MS.toInt()
+            var result: ByteArray? = null
 
-                    val serverAddress = InetAddress.getByName(upstreamDns.serverIp)
-                    val sendPacket = DatagramPacket(
-                        queryData, queryData.size,
-                        serverAddress, upstreamDns.serverPort
-                    )
-                    socket.send(sendPacket)
+            // Try primary upstream first
+            result = tryForward(queryData, upstreamDns.serverIp, upstreamDns.serverPort)
 
-                    val receiveBuffer = ByteArray(MAX_DNS_PACKET_SIZE)
-                    val receivePacket = DatagramPacket(receiveBuffer, receiveBuffer.size)
-                    socket.receive(receivePacket)
-
-                    val response = receiveBuffer.copyOf(receivePacket.length)
-                    callback(response)
-                } catch (e: Exception) {
-                    Log.e(TAG, "DNS async forward failed: ${e.message}")
-                    _stats.failed += 1
-                    callback(null)
-                } finally {
-                    try { socket.close() } catch (_: Exception) {}
+            // If primary failed, try fallback DNS servers
+            if (result == null) {
+                Log.w(TAG, "Primary DNS (${upstreamDns.serverIp}) failed, trying fallbacks")
+                for ((ip, port) in FALLBACK_DNS) {
+                    if (ip == upstreamDns.serverIp) continue // Skip if same as primary
+                    result = tryForward(queryData, ip, port)
+                    if (result != null) {
+                        Log.i(TAG, "Fallback DNS ($ip) succeeded")
+                        break
+                    }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "DNS async forward error: ${e.message}")
-                _stats.failed += 1
-                callback(null)
             }
+
+            if (result == null) {
+                _stats.failed += 1
+            }
+
+            callback(result)
         }.start()
     }
 
     /**
-     * Forward the DNS query to the upstream DNS server (synchronous, blocking).
-     * Only used by the legacy handleQuery method.
+     * Try to forward a DNS query to a specific server.
+     * Returns the response bytes on success, null on failure.
      */
-    private fun forwardQuery(queryData: ByteArray): ByteArray? {
-        val socket = DatagramSocket()
-        return try {
-            vpnService.protectSocket(socket)
-            socket.soTimeout = 5000
+    private fun tryForward(queryData: ByteArray, serverIp: String, serverPort: Int): ByteArray? {
+        var socket: DatagramSocket? = null
+        try {
+            socket = DatagramSocket()
+            val protected = vpnService.protectSocket(socket)
+            if (!protected) {
+                Log.e(TAG, "Failed to protect DNS socket for $serverIp — skipping")
+                return null
+            }
+            socket.soTimeout = DNS_TIMEOUT_MS.toInt()
 
-            val serverAddress = InetAddress.getByName(upstreamDns.serverIp)
+            val serverAddress = InetAddress.getByName(serverIp)
             val sendPacket = DatagramPacket(
                 queryData, queryData.size,
-                serverAddress, upstreamDns.serverPort
+                serverAddress, serverPort
             )
             socket.send(sendPacket)
 
@@ -266,13 +244,12 @@ class DnsInterceptor(private val vpnService: DncVpnService) {
             val receivePacket = DatagramPacket(receiveBuffer, receiveBuffer.size)
             socket.receive(receivePacket)
 
-            receiveBuffer.copyOf(receivePacket.length)
+            return receiveBuffer.copyOf(receivePacket.length)
         } catch (e: Exception) {
-            Log.e(TAG, "DNS forward failed: ${e.message}")
-            _stats.failed += 1
-            null
+            Log.e(TAG, "DNS forward to $serverIp:$serverPort failed: ${e.message}")
+            return null
         } finally {
-            try { socket.close() } catch (_: Exception) {}
+            try { socket?.close() } catch (_: Exception) {}
         }
     }
 

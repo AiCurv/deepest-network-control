@@ -164,6 +164,12 @@ fun SettingsScreen(
 
                         if (!isCaInstalled) {
                             Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "HTTPS filtering requires the CA certificate to be installed. Tap the button below to install it.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = DncOrange
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
                             Button(
                                 onClick = onInstallCaCert,
                                 shape = RoundedCornerShape(12.dp),
@@ -177,6 +183,59 @@ fun SettingsScreen(
                                 Text("Install CA Certificate")
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // Certificate Management (always visible, not just when HTTPS is on)
+        item {
+            SectionHeader("CERTIFICATE")
+        }
+
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = DncSurfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("CA Certificate", fontWeight = FontWeight.SemiBold, color = DncOnSurface)
+                            Text(
+                                text = if (isCaInstalled) "Installed — HTTPS filtering available" else "Not installed — install to enable HTTPS filtering",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (isCaInstalled) DncGreen else DncOrange
+                            )
+                        }
+                        Icon(
+                            imageVector = if (isCaInstalled) Icons.Filled.CheckCircle else Icons.Filled.Warning,
+                            contentDescription = null,
+                            tint = if (isCaInstalled) DncGreen else DncOrange,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = onInstallCaCert,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isCaInstalled) DncSurfaceVariant else DncCyan,
+                            contentColor = if (isCaInstalled) DncOnSurface else Color.Black
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            if (isCaInstalled) Icons.Filled.Refresh else Icons.Filled.VerifiedUser,
+                            null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(if (isCaInstalled) "Reinstall Certificate" else "Install CA Certificate")
                     }
                 }
             }
@@ -313,7 +372,7 @@ fun SettingsScreen(
                     Text("Version 1.0.0-alpha", style = MaterialTheme.typography.bodySmall, color = DncOnSurfaceVariant)
                     Spacer(modifier = Modifier.height(4.dp))
                     Text("License: GPL-3.0", style = MaterialTheme.typography.bodySmall, color = DncOnSurfaceVariant)
-                    Text("github.com/dnc-project/deepest-network-control", style = MaterialTheme.typography.bodySmall, color = DncCyan)
+                    Text("github.com/AiCurv/deepest-network-control", style = MaterialTheme.typography.bodySmall, color = DncCyan)
                 }
             }
         }

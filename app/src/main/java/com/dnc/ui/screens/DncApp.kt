@@ -7,12 +7,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.dnc.cert.CertificateManager
 import com.dnc.filter.FilterEngine
 import com.dnc.proxy.HttpProxy
 import com.dnc.vpn.DncVpnService
@@ -37,6 +39,9 @@ fun DncApp(
     val dnsQueryCount by DncVpnService.dnsQueryCount.collectAsState()
     val redirectsBlocked by DncVpnService.redirectsBlockedCount.collectAsState()
 
+    // Get context for CertificateManager
+    val context = LocalContext.current
+
     // Get filter engine stats
     val filterEngine = remember { FilterEngine.getInstance() }
     var stats by remember { mutableStateOf(filterEngine.getStats()) }
@@ -49,19 +54,22 @@ fun DncApp(
         }
     }
 
-    // Get HTTP proxy request log for the Log screen
-    val requestLog = remember { mutableStateListOf<HttpProxy.RequestLogEntry>() }
-    LaunchedEffect(isVpnActive) {
-        while (isVpnActive) {
-            kotlinx.coroutines.delay(1000)
-            // Refresh log from proxy
-            val proxy = com.dnc.vpn.DncVpnService.Companion
-            // For now, we use the existing log
-        }
-    }
-
     // Track HTTPS filtering state
     var httpsFilteringEnabled by remember { mutableStateOf(false) }
+
+    // Track CA certificate installation status
+    var isCaInstalled by remember { mutableStateOf(false) }
+
+    // Check CA install status periodically
+    LaunchedEffect(Unit) {
+        while (true) {
+            try {
+                val certManager = CertificateManager.getInstance(context)
+                isCaInstalled = certManager.isCaInstalled()
+            } catch (_: Exception) {}
+            kotlinx.coroutines.delay(3000)
+        }
+    }
 
     val screens = listOf(
         Screen.Dashboard,
@@ -126,7 +134,7 @@ fun DncApp(
                     dnsQueryCount = dnsQueryCount,
                     redirectsBlocked = redirectsBlocked,
                     activeRulesCount = stats.totalRules,
-                    recentBlocked = emptyList(), // Real blocked domains come from the proxy log
+                    recentBlocked = emptyList(),
                     httpsFilteringEnabled = httpsFilteringEnabled,
                     onHttpsFilteringChanged = { enabled ->
                         httpsFilteringEnabled = enabled
@@ -143,13 +151,25 @@ fun DncApp(
             }
 
             composable(Screen.Log.route) {
-                LogScreen(logEntries = requestLog.toList())
+                LogScreen(logEntries = emptyList())
             }
 
             composable(Screen.Settings.route) {
                 SettingsScreen(
-                    onInstallCaCert = { /* TODO: wire to CertificateManager */ },
-                    isCaInstalled = false,
+                    onInstallCaCert = {
+                        // Wire to CertificateManager
+                        try {
+                            val certManager = CertificateManager.getInstance(context)
+                            certManager.installCaCertificate()
+                            // Mark as installed after triggering the install flow
+                            // (user still needs to confirm in the system dialog)
+                            certManager.setCaInstalled(true)
+                            isCaInstalled = true
+                        } catch (e: Exception) {
+                            android.util.Log.e("DncApp", "Failed to install CA cert: ${e.message}")
+                        }
+                    },
+                    isCaInstalled = isCaInstalled,
                     httpsFilteringEnabled = httpsFilteringEnabled,
                     onHttpsFilteringChanged = { enabled ->
                         httpsFilteringEnabled = enabled

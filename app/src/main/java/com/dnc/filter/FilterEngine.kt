@@ -77,8 +77,9 @@ class FilterEngine private constructor(private val context: Context) {
     init {
         loadCustomRules()
         loadDefaultLists()
-        // Auto-download EasyList on first launch so blocking works out of the box
-        autoDownloadDefaultLists()
+        addBuiltInRedirectBlockers()
+        // NO auto-download — user must manually enable and update filter lists
+        // This prevents unexpected battery drain and data usage
     }
 
     // ========== Filter List Management ==========
@@ -356,11 +357,16 @@ class FilterEngine private constructor(private val context: Context) {
     // ========== Custom Rules ==========
 
     fun addCustomRule(ruleText: String): FilterRule? {
-        val rule = FilterListParser.parseRule(ruleText, "custom") ?: return null
-        customRules.add(rule)
-        addRules(listOf(rule))
-        saveCustomRules()
-        return rule
+        try {
+            val rule = FilterListParser.parseRule(ruleText, "custom") ?: return null
+            customRules.add(rule)
+            addRules(listOf(rule))
+            saveCustomRules()
+            return rule
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to add custom rule: $ruleText — ${e.message}")
+            return null
+        }
     }
 
     fun removeCustomRule(ruleText: String) {
@@ -470,7 +476,8 @@ class FilterEngine private constructor(private val context: Context) {
                     id = id,
                     name = name,
                     url = url,
-                    enabled = true // Enabled by default — auto-download on startup
+                    enabled = false, // Disabled by default — user must manually enable
+                    ruleCount = 0
                 )
             }
         }
@@ -497,6 +504,33 @@ class FilterEngine private constructor(private val context: Context) {
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Add built-in redirect blocking rules.
+     * These are domains known to be used as redirect targets for ads/trackers.
+     * They are blocked at the DNS level so the redirect never even resolves.
+     */
+    private fun addBuiltInRedirectBlockers() {
+        val builtInRules = listOf(
+            // Redirect domains that users commonly want to block
+            "||displayendpointstarring.com^",
+            "||displayendpointstarring.com^$important"
+        )
+
+        for (ruleText in builtInRules) {
+            try {
+                val rule = FilterListParser.parseRule(ruleText, "builtin-redirect")
+                if (rule != null) {
+                    allRules.add(rule)
+                }
+            } catch (_: Exception) {}
+        }
+
+        if (allRules.isNotEmpty()) {
+            rebuildIndexes()
+            Log.i(TAG, "Built-in redirect blocker rules loaded")
         }
     }
 
