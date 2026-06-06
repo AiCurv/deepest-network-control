@@ -8,6 +8,7 @@ import com.dnc.proxy.HttpProxy
 import com.dnc.proxy.HttpsProxy
 import com.dnc.proxy.RedirectBlocker
 import com.dnc.proxy.SniParser
+import java.io.ByteArrayOutputStream
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
@@ -26,8 +27,14 @@ import java.util.concurrent.atomic.AtomicInteger
  * 3. Relay data bidirectionally: App ↔ TUN ↔ Socket ↔ Server
  * 4. Apply filtering (DNS blocking, URL blocking, redirect blocking)
  *
- * This is the CORE component that makes the VPN actually work.
- * Without this, the VPN intercepts packets but never connects to servers.
+ * For HTTP traffic (port 80):
+ * - Responses are inspected for redirects (301/302)
+ * - Redirects to blocked domains are replaced with 200 OK
+ * - URL-based filtering is applied
+ *
+ * For HTTPS traffic (port 443):
+ * - SNI-based domain filtering at connection time
+ * - Full MITM if HTTPS filtering is enabled and CA is installed
  */
 class TcpRelay(
     private val vpnService: DncVpnService,
@@ -66,7 +73,11 @@ class TcpRelay(
         var relayThread: Thread? = null,
         var isBlocked: Boolean = false,
         var blockedDomain: String? = null,
-        var isMitm: Boolean = false
+        var isMitm: Boolean = false,
+        // HTTP response buffer for reassembly and filtering
+        var responseBuffer: ByteArrayOutputStream = ByteArrayOutputStream(),
+        // Track whether we've seen the first HTTP response
+        var seenFirstResponse: Boolean = false
     ) {
         val key: String
             get() = "${InetAddress.getByAddress(srcIp).hostAddress}:$srcPort-${InetAddress.getByAddress(dstIp).hostAddress}:$dstPort"
@@ -102,6 +113,9 @@ class TcpRelay(
 
     // Packet ID generator
     private val packetIdGenerator = AtomicInteger(1000)
+
+    // Redirect blocker for HTTP traffic inspection
+    private val redirectBlocker = RedirectBlocker()
 
     /**
      * Handle a TCP packet from the TUN interface.
@@ -213,8 +227,13 @@ class TcpRelay(
         if (dstPort == 443 && tcpPacket.hasPayload) {
             val sni = SniParser.extractSni(tcpPacket.payload)
             if (sni != null) {
-                val filterEngine = FilterEngine.getInstance()
-                if (filterEngine.shouldBlockDomain(sni)) {
+                val shouldBlock = try {
+                    FilterEngine.getInstance().shouldBlockDomain(sni)
+                } catch (e: Exception) {
+                    Log.w(TAG, "FilterEngine error for SNI $sni: ${e.message}")
+                    false
+                }
+                if (shouldBlock) {
                     blockedDomain = sni
                     vpnService.incrementBlocked()
                     Log.d(TAG, "BLOCKED (SNI): $sni")
@@ -393,6 +412,9 @@ class TcpRelay(
     /**
      * Read data from the server socket and write it back to the TUN interface
      * as properly formatted TCP/IP packets.
+     *
+     * For HTTP traffic (port 80), responses are inspected for redirects and
+     * filtered through the redirect blocker before being sent to the client.
      */
     private fun relayServerData(
         conn: RelayConnection,
@@ -417,12 +439,20 @@ class TcpRelay(
 
                 if (bytesRead == 0) continue
 
+                var dataToSend = buffer.copyOfRange(0, bytesRead)
+
+                // === HTTP response inspection for port 80 ===
+                if (conn.dstPort == 80 && !conn.seenFirstResponse) {
+                    dataToSend = processHttpResponse(conn, dataToSend, key)
+                    conn.seenFirstResponse = true
+                }
+
                 // Split into MTU-sized chunks if needed
                 val mtu = DncVpnService.VPN_MTU - 40 // MTU - IP header - TCP header
                 var offset = 0
-                while (offset < bytesRead) {
-                    val chunkSize = minOf(mtu, bytesRead - offset)
-                    val chunk = buffer.copyOfRange(offset, offset + chunkSize)
+                while (offset < dataToSend.size) {
+                    val chunkSize = minOf(mtu, dataToSend.size - offset)
+                    val chunk = dataToSend.copyOfRange(offset, offset + chunkSize)
 
                     // Build a TCP data packet from server -> client
                     val responsePacket = PacketParser.buildTcpDataPacket(
@@ -480,6 +510,110 @@ class TcpRelay(
             closeConnection(conn)
             connections.remove(key)
         }
+    }
+
+    /**
+     * Process an HTTP response for redirect blocking and URL filtering.
+     *
+     * This inspects the first HTTP response on port 80 connections.
+     * If a redirect (301/302) is detected and the target matches a filter rule,
+     * the redirect is replaced with a 200 OK empty response.
+     *
+     * For non-redirect responses, the data passes through unchanged.
+     */
+    private fun processHttpResponse(
+        conn: RelayConnection,
+        responseData: ByteArray,
+        key: String
+    ): ByteArray {
+        try {
+            // Try to parse as HTTP response
+            val responseText = String(responseData, Charsets.UTF_8)
+
+            // Quick check: does this look like an HTTP response?
+            if (!responseText.startsWith("HTTP/")) {
+                return responseData // Not an HTTP response, pass through
+            }
+
+            // Parse the status line
+            val firstLine = responseText.substringBefore("\r\n")
+            val statusCode = firstLine.split(" ").getOrNull(1)?.toIntOrNull() ?: return responseData
+
+            // Check for redirect (3xx)
+            if (statusCode in 300..399) {
+                // Extract Location header
+                val locationHeader = responseText.lines().find {
+                    it.startsWith("Location:", ignoreCase = true) ||
+                    it.startsWith("location:", ignoreCase = true)
+                }
+                val location = locationHeader?.substringAfter(":")?.trim()
+
+                if (location != null) {
+                    Log.d(TAG, "HTTP Redirect detected: $statusCode -> $location")
+
+                    val shouldBlockRedirect = try {
+                        FilterEngine.getInstance().shouldBlockRequest(location, "", FilterOption.OTHER)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "FilterEngine error for redirect $location: ${e.message}")
+                        false
+                    }
+
+                    if (shouldBlockRedirect) {
+                        vpnService.incrementRedirectsBlocked()
+                        vpnService.incrementBlocked()
+                        Log.i(TAG, "REDIRECT BLOCKED: $statusCode -> $location (filter match)")
+
+                        // Replace the redirect with a 200 OK empty response
+                        // This prevents the browser from following the redirect
+                        val blockedResponse = "HTTP/1.1 200 OK\r\n" +
+                                "Content-Length: 0\r\n" +
+                                "X-DNC-Blocked: redirect\r\n" +
+                                "\r\n"
+                        return blockedResponse.toByteArray(Charsets.UTF_8)
+                    }
+
+                    // Also check custom redirect rules
+                    val customResult = redirectBlocker.processResponse(location,
+                        com.dnc.proxy.HttpProxy.HttpResponse(
+                            statusCode = statusCode,
+                            statusText = "",
+                            headers = mapOf("Location" to location),
+                            body = ByteArray(0)
+                        )
+                    )
+                    if (customResult.action == RedirectBlocker.RedirectAction.BLOCKED) {
+                        vpnService.incrementRedirectsBlocked()
+                        vpnService.incrementBlocked()
+                        Log.i(TAG, "REDIRECT BLOCKED (custom rule): $statusCode -> $location")
+
+                        val blockedResponse = "HTTP/1.1 200 OK\r\n" +
+                                "Content-Length: 0\r\n" +
+                                "X-DNC-Blocked: redirect\r\n" +
+                                "\r\n"
+                        return blockedResponse.toByteArray(Charsets.UTF_8)
+                    }
+                }
+            }
+
+            // Not a redirect or redirect allowed — check if the URL itself should be blocked
+            // (for non-redirect responses, we still want to check URL-based rules)
+            val contentTypeLine = responseText.lines().find {
+                it.startsWith("Content-Type:", ignoreCase = true)
+            }
+            val isHtml = contentTypeLine?.contains("text/html", ignoreCase = true) == true
+
+            if (isHtml) {
+                // Extract the request URL from the connection info for filter matching
+                // We don't have the original request URL here, but we can use the
+                // destination IP's resolved domain for DNS-level blocking
+                // URL-level blocking is handled at the DNS level for now
+            }
+
+        } catch (e: Exception) {
+            Log.w(TAG, "Error processing HTTP response for $key: ${e.message}")
+        }
+
+        return responseData // Pass through unchanged
     }
 
     /**

@@ -28,7 +28,7 @@ class DnsInterceptor(private val vpnService: DncVpnService) {
         private const val MAX_DNS_PACKET_SIZE = 1024
         private const val DEFAULT_CACHE_SIZE = 1000
         private const val CACHE_TTL_OVERRIDE = 0 // 0 = use original TTL
-        private const val DNS_TIMEOUT_MS = 8000L
+        private const val DNS_TIMEOUT_MS = 3000L // 3s per server — fast fail, try next
         private const val MAX_RETRIES = 2
 
         // Fallback DNS servers to try if primary fails
@@ -115,8 +115,10 @@ class DnsInterceptor(private val vpnService: DncVpnService) {
         sourcePort: Int,
         onAsyncResponse: (ByteArray?) -> Unit
     ): ByteArray? {
+        // Even if not running, try to forward the query so the app gets a response
         if (!isRunning) {
-            Log.w(TAG, "DNS interceptor not running, returning null")
+            Log.w(TAG, "DNS interceptor not running, forwarding raw query")
+            forwardQueryAsync(queryData, onAsyncResponse)
             return null
         }
 
@@ -168,9 +170,9 @@ class DnsInterceptor(private val vpnService: DncVpnService) {
                 cacheResponse(cacheKey, responseBytes)
                 Log.d(TAG, "DNS response received for: $domain")
             } else {
-                Log.w(TAG, "DNS forward failed for: $domain")
+                Log.w(TAG, "DNS forward failed for: $domain — all servers exhausted")
             }
-            // ALWAYS call the callback so the caller knows we're done
+            // ALWAYS call the callback so the caller gets some response
             onAsyncResponse(responseBytes)
         }
 
@@ -178,8 +180,14 @@ class DnsInterceptor(private val vpnService: DncVpnService) {
     }
 
     private fun shouldBlockDomain(domain: String): Boolean {
-        val filterEngine = com.dnc.filter.FilterEngine.getInstance()
-        return filterEngine.shouldBlockDomain(domain)
+        return try {
+            val filterEngine = com.dnc.filter.FilterEngine.getInstance()
+            filterEngine.shouldBlockDomain(domain)
+        } catch (e: Exception) {
+            // FilterEngine not initialized or error — don't block anything
+            Log.w(TAG, "FilterEngine error checking domain $domain: ${e.message}")
+            false
+        }
     }
 
     /**

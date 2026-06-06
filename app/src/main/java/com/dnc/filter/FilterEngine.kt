@@ -77,7 +77,7 @@ class FilterEngine private constructor(private val context: Context) {
     init {
         loadCustomRules()
         loadDefaultLists()
-        addBuiltInRedirectBlockers()
+        // NO built-in redirect blockers — user adds their own custom rules
         // NO auto-download — user must manually enable and update filter lists
         // This prevents unexpected battery drain and data usage
     }
@@ -485,9 +485,10 @@ class FilterEngine private constructor(private val context: Context) {
 
     /**
      * Auto-download enabled filter lists in the background.
-     * This ensures blocking works as soon as the app starts.
+     * DEPRECATED: User must manually trigger updates now.
+     * This method is kept for manual update trigger only.
      */
-    private fun autoDownloadDefaultLists() {
+    fun autoDownloadDefaultLists() {
         scope.launch {
             for ((id, info) in filterLists) {
                 if (info.enabled && info.ruleCount == 0) {
@@ -504,33 +505,6 @@ class FilterEngine private constructor(private val context: Context) {
                     }
                 }
             }
-        }
-    }
-
-    /**
-     * Add built-in redirect blocking rules.
-     * These are domains known to be used as redirect targets for ads/trackers.
-     * They are blocked at the DNS level so the redirect never even resolves.
-     */
-    private fun addBuiltInRedirectBlockers() {
-        val builtInRules = listOf(
-            // Redirect domains that users commonly want to block
-            "||displayendpointstarring.com^",
-            "||displayendpointstarring.com^\$important"
-        )
-
-        for (ruleText in builtInRules) {
-            try {
-                val rule = FilterListParser.parseRule(ruleText, "builtin-redirect")
-                if (rule != null) {
-                    allRules.add(rule)
-                }
-            } catch (_: Exception) {}
-        }
-
-        if (allRules.isNotEmpty()) {
-            rebuildIndexes()
-            Log.i(TAG, "Built-in redirect blocker rules loaded")
         }
     }
 

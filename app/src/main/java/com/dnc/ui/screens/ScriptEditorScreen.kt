@@ -54,7 +54,7 @@ fun ScriptEditorScreen(
 
     val scriptletEngine = ScriptletEngine.getInstance()
     val resourceRegistry = ResourceRegistry.getInstance()
-    val customRules = filterEngine.getCustomRules()
+    val customRules = remember { try { filterEngine.getCustomRules() } catch (_: Exception) { emptyList() } }
 
     Column(
         modifier = Modifier
@@ -109,13 +109,18 @@ fun ScriptEditorScreen(
                     onTextChange = { editorText = it },
                     onAdd = {
                         if (editorText.isNotBlank()) {
-                            val rule = filterEngine.addCustomRule(editorText.trim())
-                            if (rule != null) {
-                                validationError = null
-                                validationSuccess = true
-                                editorText = ""
-                            } else {
-                                validationError = "Invalid rule syntax"
+                            try {
+                                val rule = filterEngine.addCustomRule(editorText.trim())
+                                if (rule != null) {
+                                    validationError = null
+                                    validationSuccess = true
+                                    editorText = ""
+                                } else {
+                                    validationError = "Invalid rule syntax"
+                                    validationSuccess = false
+                                }
+                            } catch (e: Exception) {
+                                validationError = "Error: ${e.message}"
                                 validationSuccess = false
                             }
                         }
@@ -141,7 +146,9 @@ fun ScriptEditorScreen(
             }
             EditorTab.MY_RULES -> {
                 MyRulesList(rules = customRules, onDelete = { ruleText ->
-                    filterEngine.removeCustomRule(ruleText)
+                    try {
+                        filterEngine.removeCustomRule(ruleText)
+                    } catch (_: Exception) {}
                 })
             }
         }

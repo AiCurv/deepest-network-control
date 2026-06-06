@@ -129,7 +129,11 @@ class DncVpnService : VpnService() {
             builder.addDnsServer("8.8.8.8")
             builder.setSession("DNC")
             builder.setMtu(VPN_MTU)
-            builder.setBlocking(true)
+            // CRITICAL: Do NOT use setBlocking(true) — it silently drops ALL packets
+            // that the VPN doesn't explicitly handle, causing DNS failures and
+            // making all network traffic fail. Instead, we handle all traffic
+            // ourselves in the packet processing loop.
+            builder.setBlocking(false)
 
             vpnInterface = builder.establish()
 

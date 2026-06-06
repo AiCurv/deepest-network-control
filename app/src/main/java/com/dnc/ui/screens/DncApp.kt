@@ -161,10 +161,9 @@ fun DncApp(
                         try {
                             val certManager = CertificateManager.getInstance(context)
                             certManager.installCaCertificate()
-                            // Mark as installed after triggering the install flow
-                            // (user still needs to confirm in the system dialog)
-                            certManager.setCaInstalled(true)
-                            isCaInstalled = true
+                            // Don't mark as installed here — the user still needs to
+                            // confirm in the system dialog. The periodic check will
+                            // detect when the CA is actually trusted.
                         } catch (e: Exception) {
                             android.util.Log.e("DncApp", "Failed to install CA cert: ${e.message}")
                         }

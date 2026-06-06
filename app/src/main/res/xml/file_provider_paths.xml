@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- External files dir for certificate export -->
+    <external-files-path name="certs" path="certs/" />
+    <!-- Internal cache for fallback cert export -->
+    <cache-path name="cache" path="." />
+    <!-- Files dir for general file sharing -->
+    <files-path name="files" path="." />
+</paths>

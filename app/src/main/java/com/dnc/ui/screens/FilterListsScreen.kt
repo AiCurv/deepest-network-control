@@ -40,7 +40,10 @@ fun FilterListsScreen(
             try {
                 filterLists = filterEngine.getFilterLists()
                 customRules = filterEngine.getCustomRules()
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                // Silently ignore — don't crash if FilterEngine has issues
+                android.util.Log.w("FilterListsScreen", "Error refreshing filter lists: ${e.message}")
+            }
             kotlinx.coroutines.delay(3000)
         }
     }
@@ -240,7 +243,7 @@ fun FilterListsScreen(
                                             statusMessage = "Failed: ${error.message}"
                                         }
                                         isLoading = false
-                                        filterLists = filterEngine.getFilterLists()
+                                        filterLists = try { filterEngine.getFilterLists() } catch (_: Exception) { emptyList() }
                                     }
                                 } catch (e: Exception) {
                                     withContext(Dispatchers.Main) {
@@ -297,16 +300,17 @@ fun FilterListsScreen(
                     onClick = {
                         if (newRuleText.isNotBlank()) {
                             try {
-                                val rule = filterEngine.addCustomRule(newRuleText)
+                                val trimmedRule = newRuleText.trim()
+                                val rule = filterEngine.addCustomRule(trimmedRule)
                                 if (rule != null) {
-                                    statusMessage = "Rule added: ${newRuleText.trim()}"
+                                    statusMessage = "Rule added: $trimmedRule"
                                 } else {
                                     statusMessage = "Invalid rule syntax — check format"
                                 }
                                 newRuleText = ""
-                                customRules = filterEngine.getCustomRules()
+                                customRules = try { filterEngine.getCustomRules() } catch (_: Exception) { emptyList() }
                             } catch (e: Exception) {
-                                statusMessage = "Error adding rule: ${e.message}"
+                                statusMessage = "Error: ${e.message ?: "Unknown error"}"
                                 newRuleText = ""
                             }
                         }

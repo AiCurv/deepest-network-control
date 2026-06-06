@@ -503,46 +503,74 @@ class CertificateManager private constructor(private val context: Context) {
                 return
             }
 
-            // Always export PEM too for manual installation
+            // Write cert files to app's external cache (accessible via FileProvider)
+            val certDir = File(context.getExternalFilesDir(null), "certs")
+            certDir.mkdirs()
+
+            // Write DER cert
+            val certFile = File(certDir, "dnc_ca_cert.crt")
+            FileOutputStream(certFile).use { it.write(certDer) }
+            Log.i(TAG, "DER cert exported to: ${certFile.absolutePath}")
+
+            // Write PEM cert too
             val pemData = exportCaCertificatePem()
             if (pemData != null) {
-                val pemFile = File(context.cacheDir, "dnc_ca_cert.pem")
+                val pemFile = File(certDir, "dnc_ca_cert.pem")
                 FileOutputStream(pemFile).use { it.write(pemData.toByteArray()) }
                 Log.i(TAG, "PEM cert exported to: ${pemFile.absolutePath}")
             }
 
-            // Write DER cert to cache
-            val certFile = File(context.cacheDir, "dnc_ca_cert.crt")
-            FileOutputStream(certFile).use { it.write(certDer) }
-            Log.i(TAG, "DER cert exported to: ${certFile.absolutePath}")
+            // Get a content URI via FileProvider (required on Android 7+, API 24+)
+            // Uri.fromFile() throws FileUriExposedException on API 24+
+            val certUri = try {
+                androidx.core.content.FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    certFile
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "FileProvider failed, falling back to content URI: ${e.message}")
+                // Fallback: try to use a content URI manually
+                try {
+                    val pemFile = File(certDir, "dnc_ca_cert.pem")
+                    androidx.core.content.FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        pemFile
+                    )
+                } catch (e2: Exception) {
+                    Log.e(TAG, "All FileProvider attempts failed: ${e2.message}")
+                    // Last resort: open security settings
+                    openSecuritySettings()
+                    return
+                }
+            }
+
+            Log.i(TAG, "Cert URI: $certUri")
 
             // Try multiple installation methods in order of preference
 
-            // Method 1: KeyChain install intent (works on most Android versions)
+            // Method 1: KeyChain install intent with content URI
             try {
                 val installIntent = android.security.KeyChain.createInstallIntent()
                 installIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                installIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 installIntent.putExtra("name", "$CA_COMMON_NAME - $CA_ORGANIZATION")
-                installIntent.setDataAndType(
-                    Uri.fromFile(certFile),
-                    "application/x-x509-ca-cert"
-                )
+                installIntent.setDataAndType(certUri, "application/x-x509-ca-cert")
                 context.startActivity(installIntent)
-                Log.i(TAG, "CA certificate install intent triggered via KeyChain")
+                Log.i(TAG, "CA certificate install intent triggered via KeyChain + FileProvider")
                 return
             } catch (e: Exception) {
                 Log.w(TAG, "KeyChain install intent failed: ${e.message}")
             }
 
-            // Method 2: Direct credentials intent (older Android)
+            // Method 2: Direct credentials intent with content URI
             try {
                 val intent = Intent("android.credentials.INSTALL")
                 intent.putExtra("name", "$CA_COMMON_NAME - $CA_ORGANIZATION")
-                intent.setDataAndType(
-                    Uri.fromFile(certFile),
-                    "application/x-x509-ca-cert"
-                )
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                intent.setDataAndType(certUri, "application/x-x509-ca-cert")
                 context.startActivity(intent)
                 Log.i(TAG, "CA certificate install intent triggered via credentials")
                 return
@@ -550,35 +578,38 @@ class CertificateManager private constructor(private val context: Context) {
                 Log.w(TAG, "Direct credentials intent failed: ${e.message}")
             }
 
-            // Method 3: Install as PEM (some devices prefer this)
+            // Method 3: Try with the KeyChain extra for the cert data
             try {
-                val pemFile = File(context.cacheDir, "dnc_ca_cert.pem")
-                val intent = Intent("android.credentials.INSTALL")
-                intent.putExtra("name", "$CA_COMMON_NAME - $CA_ORGANIZATION")
-                intent.setDataAndType(
-                    Uri.fromFile(pemFile),
-                    "application/x-x509-ca-cert"
-                )
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(intent)
-                Log.i(TAG, "CA certificate install intent triggered via PEM")
+                val installIntent = android.security.KeyChain.createInstallIntent()
+                installIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                installIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                installIntent.putExtra("name", "$CA_COMMON_NAME - $CA_ORGANIZATION")
+                // Some devices expect the cert as an extra rather than data URI
+                installIntent.putExtra("CA_CERT", certUri)
+                installIntent.setDataAndType(certUri, "application/x-x509-ca-cert")
+                context.startActivity(installIntent)
+                Log.i(TAG, "CA certificate install intent triggered via KeyChain extra")
                 return
             } catch (e: Exception) {
-                Log.w(TAG, "PEM install intent failed: ${e.message}")
+                Log.w(TAG, "KeyChain extra install intent failed: ${e.message}")
             }
 
             // Method 4: Open Security Settings for manual install
-            try {
-                val settingsIntent = Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS)
-                settingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(settingsIntent)
-                Log.i(TAG, "Opened Security Settings for manual CA install")
-            } catch (e2: Exception) {
-                Log.e(TAG, "Cannot open security settings: ${e2.message}")
-            }
+            openSecuritySettings()
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to trigger CA install: ${e.message}")
+        }
+    }
+
+    private fun openSecuritySettings() {
+        try {
+            val settingsIntent = Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS)
+            settingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(settingsIntent)
+            Log.i(TAG, "Opened Security Settings for manual CA install")
+        } catch (e: Exception) {
+            Log.e(TAG, "Cannot open security settings: ${e.message}")
         }
     }
 
