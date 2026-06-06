@@ -4,10 +4,14 @@ import android.util.Log
 import com.dnc.cert.CertificateManager
 import com.dnc.filter.FilterEngine
 import com.dnc.filter.FilterOption
+import com.dnc.handler.AdvancedRuleHandlers
+import com.dnc.handler.ResourceRegistry
+import com.dnc.injector.HtmlInjector
 import com.dnc.vpn.DncVpnService
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.URI
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.SSLEngine
@@ -362,39 +366,58 @@ class MitmSession(
 
     /**
      * Process decrypted client plaintext (HTTP request)
-     * 1. Parse the HTTP request
-     * 2. Check if it should be blocked
-     * 3. If allowed, encrypt with serverEngine and forward to real server
-     * Returns: encrypted data to send back to client (if any immediate response needed)
+     *
+     * Phase 4 enhancements:
+     * - $removeparam: Strip tracking params from request URL before forwarding
+     * - $redirect: Serve neutral resources for blocked requests
+     * - $csp: Inject CSP headers into document responses
+     * - HTML injection: Cosmetic filtering + scriptlet injection into response body
      */
     private fun processClientPlaintext(plaintext: ByteArray): ByteArray? {
         // Buffer the plaintext for HTTP message reassembly
         requestBuffer.write(plaintext)
 
-        // Check if we have a complete HTTP request
         val requestStr = requestBuffer.toString(Charsets.UTF_8)
 
-        // Parse the HTTP request
         val httpRequest = httpProxy.parseHttpRequest(requestBuffer.toByteArray())
         if (httpRequest == null) {
-            // Incomplete request, wait for more data
             return null
         }
 
-        // We have a complete request — clear the buffer
         requestBuffer.reset()
 
-        val url = "https://$domain${httpRequest.path}"
+        var url = "https://$domain${httpRequest.path}"
+
+        val filterEngine = FilterEngine.getInstance()
+        val advancedHandlers = AdvancedRuleHandlers.getInstance()
+        val requestType = determineRequestType(httpRequest)
+
+        // === Phase 4: $removeparam — strip tracking params ===
+        val removeParamResult = advancedHandlers.processRemoveParam(url, "")
+        if (removeParamResult.wasModified) {
+            Log.d(TAG, "MITM PARAMS REMOVED: ${removeParamResult.removedParams} from $url")
+            url = removeParamResult.modifiedUrl
+        }
 
         // Check against filter engine
-        val filterEngine = FilterEngine.getInstance()
-        val requestType = determineRequestType(httpRequest)
         val shouldBlock = filterEngine.shouldBlockRequest(url, "", requestType)
 
         if (shouldBlock) {
+            // === Phase 4: $redirect — serve neutral resource instead of empty block ===
+            val redirectName = filterEngine.shouldRedirect(url, "", requestType)
+            if (redirectName != null) {
+                val resource = ResourceRegistry.getInstance().getResource(redirectName)
+                if (resource != null) {
+                    vpnService.incrementBlocked()
+                    Log.d(TAG, "MITM REDIRECTED: $url -> $redirectName")
+                    return encryptForClient(
+                        advancedHandlers.buildRedirectResponse(resource)
+                    )
+                }
+            }
+
             vpnService.incrementBlocked()
             Log.d(TAG, "MITM BLOCKED request: ${httpRequest.method} $url")
-            // Return a blocked response to the client
             return encryptForClient(
                 "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-DNC-Blocked: true\r\n\r\n".toByteArray()
             )
@@ -420,8 +443,75 @@ class MitmSession(
             }
         }
 
+        // === Phase 4: HTML injection (cosmetic + scriptlets) ===
+        val htmlInjector = HtmlInjector.getInstance()
+        val contentType = httpResponse.headers["Content-Type"] ?: httpResponse.headers["content-type"]
+        val injectionResult = htmlInjector.inject(
+            body = httpResponse.body,
+            domain = domain,
+            contentType = contentType
+        )
+
+        if (injectionResult.wasModified) {
+            val modifiedResponse = buildModifiedResponse(httpResponse, injectionResult.modifiedBody)
+            Log.d(TAG, "MITM HTML MODIFIED: $domain (css=${injectionResult.cosmeticInjected}, js=${injectionResult.scriptletsInjected})")
+            return encryptForClient(modifiedResponse)
+        }
+
+        // === Phase 4: $csp injection ===
+        if (requestType == FilterOption.DOCUMENT) {
+            val cspResult = advancedHandlers.processCsp(url, "")
+            if (cspResult.shouldInject && cspResult.cspHeader != null) {
+                val modifiedHeaders = httpResponse.headers.toMutableMap()
+                advancedHandlers.injectCspHeader(modifiedHeaders, cspResult.cspHeader)
+                val cspResponse = buildResponseWithHeaders(httpResponse, modifiedHeaders)
+                Log.d(TAG, "MITM CSP INJECTED: $domain")
+                return encryptForClient(cspResponse)
+            }
+        }
+
         // Return the (possibly modified) response to the client
         return encryptForClient(response)
+    }
+
+    /**
+     * Build a modified HTTP response with a new body, updating Content-Length
+     */
+    private fun buildModifiedResponse(
+        original: HttpProxy.HttpResponse,
+        newBody: ByteArray
+    ): ByteArray {
+        val headers = original.headers.toMutableMap()
+        headers["Content-Length"] = newBody.size.toString()
+        headers["X-DNC-Modified"] = "html-injection"
+
+        val headerStr = buildString {
+            append("HTTP/1.1 ${original.statusCode} ${original.statusText}\r\n")
+            for ((key, value) in headers) {
+                append("$key: $value\r\n")
+            }
+            append("\r\n")
+        }
+
+        return headerStr.toByteArray() + newBody
+    }
+
+    /**
+     * Build a response with modified headers, keeping the original body
+     */
+    private fun buildResponseWithHeaders(
+        original: HttpProxy.HttpResponse,
+        newHeaders: Map<String, String>
+    ): ByteArray {
+        val headerStr = buildString {
+            append("HTTP/1.1 ${original.statusCode} ${original.statusText}\r\n")
+            for ((key, value) in newHeaders) {
+                append("$key: $value\r\n")
+            }
+            append("\r\n")
+        }
+
+        return headerStr.toByteArray() + original.body
     }
 
     /**

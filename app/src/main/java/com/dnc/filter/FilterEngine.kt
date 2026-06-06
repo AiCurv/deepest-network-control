@@ -288,7 +288,67 @@ class FilterEngine private constructor(private val context: Context) {
             scriptletRules[part]?.let { results.addAll(it) }
         }
 
+        // Also include generic scriptlets (no domain restriction)
+        scriptletRules[""]?.let { results.addAll(it) }
+
         return results
+    }
+
+    /**
+     * Find all rules with $removeparam option matching a URL
+     */
+    fun findRemoveParamRules(url: String, originUrl: String): List<FilterRule> {
+        return allRules.filter { rule ->
+            rule.enabled &&
+            FilterOption.REMOVEPARAM in rule.options &&
+            rule.removeParams != null &&
+            rule.matchRequest(url, originUrl, FilterOption.OTHER)
+        }
+    }
+
+    /**
+     * Find all rules with $csp option matching a URL
+     */
+    fun findCspRules(url: String, originUrl: String): List<FilterRule> {
+        return allRules.filter { rule ->
+            rule.enabled &&
+            FilterOption.CSP in rule.options &&
+            rule.cspDirective != null &&
+            rule.matchRequest(url, originUrl, FilterOption.DOCUMENT)
+        }
+    }
+
+    /**
+     * Find all rules with $redirect option matching a URL
+     */
+    fun findRedirectRules(url: String, originUrl: String, requestType: FilterOption): List<FilterRule> {
+        return allRules.filter { rule ->
+            rule.enabled &&
+            FilterOption.REDIRECT in rule.options &&
+            rule.redirectResource != null &&
+            rule.matchRequest(url, originUrl, requestType)
+        }
+    }
+
+    /**
+     * Check if a request should be redirected (instead of blocked)
+     * Returns the redirect resource name, or null
+     */
+    fun shouldRedirect(url: String, originUrl: String, requestType: FilterOption): String? {
+        val rules = findRedirectRules(url, originUrl, requestType)
+        // First check exception rules
+        for (rule in rules) {
+            if (rule.type == FilterRuleType.EXCEPTION) return null
+        }
+        // Last matching redirect rule wins (uBO behavior)
+        return rules.lastOrNull()?.redirectResource
+    }
+
+    /**
+     * Rebuild all indexes — public API for when rules are bulk-updated
+     */
+    fun rebuildAllIndexes() {
+        rebuildIndexes()
     }
 
     // ========== Custom Rules ==========

@@ -132,11 +132,7 @@ fun LogScreen(
 
 @Composable
 private fun LogEntryItem(entry: HttpProxy.RequestLogEntry) {
-    val (actionColor, actionText) = when (entry.action) {
-        HttpProxy.Action.BLOCKED -> DncRed to "BLOCKED"
-        HttpProxy.Action.REDIRECT_BLOCKED -> DncOrange to "REDIRECT BLOCKED"
-        HttpProxy.Action.ALLOWED -> DncGreen to "ALLOWED"
-    }
+    val (actionColor, actionText) = entry.action.toLogDisplay()
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -205,4 +201,17 @@ private fun LogEntryItem(entry: HttpProxy.RequestLogEntry) {
 
 enum class LogFilter {
     ALL, BLOCKED, ALLOWED
+}
+
+// Extension: map new Phase 4 Action types for log display
+fun HttpProxy.Action.toLogDisplay(): Pair<Color, String> {
+    return when (this) {
+        HttpProxy.Action.BLOCKED -> DncRed to "BLOCKED"
+        HttpProxy.Action.REDIRECT_BLOCKED -> DncOrange to "REDIRECT BLOCKED"
+        HttpProxy.Action.ALLOWED -> DncGreen to "ALLOWED"
+        HttpProxy.Action.REDIRECTED -> DncPurple to "REDIRECTED"
+        HttpProxy.Action.PARAM_REMOVED -> DncCyan to "PARAM REMOVED"
+        HttpProxy.Action.CSP_INJECTED -> Color(0xFFFFD600) to "CSP INJECTED"
+        HttpProxy.Action.HTML_MODIFIED -> Color(0xFFE040FB) to "HTML MODIFIED"
+    }
 }

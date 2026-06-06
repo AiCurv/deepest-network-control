@@ -6,7 +6,6 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -22,6 +21,7 @@ import com.dnc.ui.theme.*
 sealed class Screen(val route: String, val label: String, val icon: ImageVector) {
     data object Dashboard : Screen("dashboard", "Dashboard", Icons.Filled.Shield)
     data object Filters : Screen("filters", "Filters", Icons.Filled.FilterList)
+    data object ScriptEditor : Screen("scripts", "Scripts", Icons.Filled.Code)
     data object Log : Screen("log", "Log", Icons.Filled.List)
     data object Settings : Screen("settings", "Settings", Icons.Filled.Settings)
 }
@@ -36,15 +36,12 @@ fun DncApp(
     val filterEngine = FilterEngine.getInstance()
     val stats by remember { mutableStateOf(filterEngine.getStats()) }
 
-    // Collect VPN stats
-    val blockedCount by DncVpnService.Companion.let {
-        // Access through the service — simplified for UI
-        mutableStateOf(0)
-    }
+    val blockedCount by remember { mutableStateOf(0) }
 
     val screens = listOf(
         Screen.Dashboard,
         Screen.Filters,
+        Screen.ScriptEditor,
         Screen.Log,
         Screen.Settings
     )
@@ -72,7 +69,8 @@ fun DncApp(
                             Text(
                                 screen.label,
                                 color = if (currentDestination?.hierarchy?.any { it.route == screen.route } == true)
-                                    DncCyan else DncOnSurfaceVariant
+                                    DncCyan else DncOnSurfaceVariant,
+                                fontSize = androidx.compose.ui.unit.TextUnit.Unspecified
                             )
                         },
                         selected = currentDestination?.hierarchy?.any { it.route == screen.route } == true,
@@ -115,6 +113,10 @@ fun DncApp(
 
             composable(Screen.Filters.route) {
                 FilterListsScreen(filterEngine = filterEngine)
+            }
+
+            composable(Screen.ScriptEditor.route) {
+                ScriptEditorScreen(filterEngine = filterEngine)
             }
 
             composable(Screen.Log.route) {

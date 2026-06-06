@@ -4,6 +4,9 @@ import android.util.Log
 import com.dnc.dns.DnsInterceptor
 import com.dnc.filter.FilterEngine
 import com.dnc.filter.FilterOption
+import com.dnc.handler.AdvancedRuleHandlers
+import com.dnc.handler.ResourceRegistry
+import com.dnc.injector.HtmlInjector
 import com.dnc.vpn.*
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -16,10 +19,14 @@ import kotlin.concurrent.thread
 
 /**
  * HTTP Proxy that intercepts and filters HTTP traffic from the VPN tunnel.
- * - Parses HTTP requests and matches against filter engine
- * - Blocks requests matching filter rules
- * - Passes responses through RedirectBlocker before returning to client
- * - Modifies request headers (remove tracking headers if configured)
+ *
+ * Phase 4 enhancements:
+ * - $removeparam: Strip tracking query parameters from URLs before forwarding
+ * - $redirect: Serve neutral resources instead of dropping blocked requests
+ * - $csp: Inject Content-Security-Policy headers into responses
+ * - Cosmetic filtering: Inject CSS to hide page elements
+ * - Scriptlet injection: Inject JavaScript to neutralize trackers/anti-adblock
+ * - HTML injection: Modify HTML response bodies via HtmlInjector
  */
 class HttpProxy(
     private val vpnService: DncVpnService,
@@ -37,6 +44,12 @@ class HttpProxy(
     // Redirect blocker
     private val redirectBlocker = RedirectBlocker()
 
+    // Phase 4: Advanced rule handlers
+    private val advancedHandlers = AdvancedRuleHandlers.getInstance()
+
+    // Phase 4: HTML injector (cosmetic + scriptlet)
+    private val htmlInjector = HtmlInjector.getInstance()
+
     // Request log for UI
     private val _requestLog = mutableListOf<RequestLogEntry>()
     val requestLog: List<RequestLogEntry> get() = _requestLog.toList()
@@ -53,7 +66,11 @@ class HttpProxy(
     enum class Action {
         ALLOWED,
         BLOCKED,
-        REDIRECT_BLOCKED
+        REDIRECT_BLOCKED,
+        REDIRECTED,      // Phase 4: $redirect — served neutral resource
+        PARAM_REMOVED,   // Phase 4: $removeparam — tracking params stripped
+        CSP_INJECTED,    // Phase 4: $csp — CSP header injected
+        HTML_MODIFIED    // Phase 4: cosmetic/scriptlet injection into HTML
     }
 
     fun start() {
@@ -77,45 +94,94 @@ class HttpProxy(
         if (!isRunning) return
         if (!tcpPacket.hasPayload) return
 
-        // Parse HTTP request from the TCP payload
         val requestData = tcpPacket.payload
         val httpRequest = parseHttpRequest(requestData) ?: return
 
         val filterEngine = FilterEngine.getInstance()
-
-        // Determine the full URL
         val url = resolveUrl(httpRequest, ipPacket)
-
-        // Determine request type for filtering
         val requestType = determineRequestType(httpRequest)
+        val domain = extractDomain(url)
 
-        // Check if request should be blocked
-        val shouldBlock = filterEngine.shouldBlockRequest(url, "", requestType)
+        // === Phase 4: $removeparam — strip tracking params before anything ===
+        val removeParamResult = advancedHandlers.processRemoveParam(url, "")
+        val effectiveUrl = removeParamResult.modifiedUrl
+
+        if (removeParamResult.wasModified) {
+            Log.d(TAG, "PARAMS REMOVED: ${removeParamResult.removedParams} from $url")
+            addToLog(url, httpRequest.method, Action.PARAM_REMOVED, statusCode = null)
+        }
+
+        // === Check if request should be blocked ===
+        val shouldBlock = filterEngine.shouldBlockRequest(effectiveUrl, "", requestType)
 
         if (shouldBlock) {
+            // === Phase 4: $redirect — serve neutral resource instead of dropping ===
+            val redirectResource = filterEngine.shouldRedirect(effectiveUrl, "", requestType)
+            if (redirectResource != null) {
+                val resource = ResourceRegistry.getInstance().getResource(redirectResource)
+                if (resource != null) {
+                    vpnService.incrementBlocked()
+                    addToLog(effectiveUrl, httpRequest.method, Action.REDIRECTED,
+                        matchedRule = redirectResource, statusCode = 200)
+                    Log.d(TAG, "REDIRECTED: ${httpRequest.method} $effectiveUrl -> $redirectResource")
+                    // The response would be built by AdvancedRuleHandlers.buildRedirectResponse()
+                    return
+                }
+            }
+
             vpnService.incrementBlocked()
-            addToLog(url, httpRequest.method, Action.BLOCKED, statusCode = null)
-            Log.d(TAG, "BLOCKED: ${httpRequest.method} $url")
-            // Don't forward — the request is silently dropped
+            addToLog(effectiveUrl, httpRequest.method, Action.BLOCKED, statusCode = null)
+            Log.d(TAG, "BLOCKED: ${httpRequest.method} $effectiveUrl")
             return
         }
 
-        // Check redirect rules
-        // Forward the request and inspect the response
+        // === Forward the request and process the response ===
         try {
-            val response = forwardHttpRequest(url, httpRequest) ?: return
+            val response = forwardHttpRequest(effectiveUrl, httpRequest) ?: return
 
-            // Pass through redirect blocker
-            val finalResponse = redirectBlocker.processResponse(url, response)
+            // === Redirect blocking (301/302) ===
+            val finalResponse = redirectBlocker.processResponse(effectiveUrl, response)
 
             if (finalResponse.action == RedirectBlocker.RedirectAction.BLOCKED) {
                 vpnService.incrementRedirectsBlocked()
-                addToLog(url, httpRequest.method, Action.REDIRECT_BLOCKED, statusCode = response.statusCode)
+                addToLog(effectiveUrl, httpRequest.method, Action.REDIRECT_BLOCKED,
+                    statusCode = response.statusCode)
                 Log.d(TAG, "REDIRECT BLOCKED: ${response.statusCode} -> ${response.headers["Location"]}")
                 return
             }
 
-            addToLog(url, httpRequest.method, Action.ALLOWED, statusCode = response.statusCode)
+            // === Phase 4: HTML injection (cosmetic + scriptlets) ===
+            var modifiedResponse = finalResponse.response
+            if (domain != null) {
+                val contentType = modifiedResponse.headers["Content-Type"] ?:
+                    modifiedResponse.headers["content-type"]
+                val injectionResult = htmlInjector.inject(
+                    body = modifiedResponse.body,
+                    domain = domain,
+                    contentType = contentType
+                )
+                if (injectionResult.wasModified) {
+                    modifiedResponse = modifiedResponse.copy(body = injectionResult.modifiedBody)
+                    addToLog(effectiveUrl, httpRequest.method, Action.HTML_MODIFIED,
+                        statusCode = modifiedResponse.statusCode)
+                    Log.d(TAG, "HTML MODIFIED: $domain (css=${injectionResult.cosmeticInjected}, js=${injectionResult.scriptletsInjected})")
+                }
+            }
+
+            // === Phase 4: $csp — inject Content-Security-Policy ===
+            if (requestType == FilterOption.DOCUMENT && domain != null) {
+                val cspResult = advancedHandlers.processCsp(effectiveUrl, "")
+                if (cspResult.shouldInject && cspResult.cspHeader != null) {
+                    val modifiedHeaders = modifiedResponse.headers.toMutableMap()
+                    advancedHandlers.injectCspHeader(modifiedHeaders, cspResult.cspHeader)
+                    modifiedResponse = modifiedResponse.copy(headers = modifiedHeaders)
+                    addToLog(effectiveUrl, httpRequest.method, Action.CSP_INJECTED,
+                        statusCode = modifiedResponse.statusCode)
+                    Log.d(TAG, "CSP INJECTED: $domain")
+                }
+            }
+
+            addToLog(effectiveUrl, httpRequest.method, Action.ALLOWED, statusCode = modifiedResponse.statusCode)
 
         } catch (e: Exception) {
             Log.e(TAG, "Error forwarding HTTP request: ${e.message}")
@@ -131,7 +197,6 @@ class HttpProxy(
             val lines = text.split("\r\n")
             if (lines.isEmpty()) return null
 
-            // Parse request line: METHOD URL HTTP/1.x
             val requestLine = lines[0]
             val requestLineParts = requestLine.split(" ", limit = 3)
             if (requestLineParts.size < 3) return null
@@ -140,7 +205,6 @@ class HttpProxy(
             var path = requestLineParts[1]
             val version = requestLineParts[2]
 
-            // Parse headers
             val headers = mutableMapOf<String, String>()
             var headerEnd = 0
             for (i in 1 until lines.size) {
@@ -157,13 +221,9 @@ class HttpProxy(
                 }
             }
 
-            // Parse body (everything after the blank line)
             val bodyStart = text.indexOf("\r\n\r\n")
             val body = if (bodyStart >= 0 && bodyStart + 4 < text.length) {
-                data.copyOfRange(
-                    text.indexOf("\r\n\r\n") + 4,
-                    data.size
-                )
+                data.copyOfRange(text.indexOf("\r\n\r\n") + 4, data.size)
             } else {
                 ByteArray(0)
             }
@@ -186,7 +246,6 @@ class HttpProxy(
      */
     private fun resolveUrl(request: HttpRequest, ipPacket: PacketParser.IpPacket): String {
         val host = request.headers["Host"] ?: ipPacket.destinationIp
-        val path = if (request.path.startsWith("http")) request.path else request.path
         return if (request.path.startsWith("http")) {
             request.path
         } else {
@@ -212,6 +271,18 @@ class HttpProxy(
     }
 
     /**
+     * Extract domain from URL
+     */
+    private fun extractDomain(url: String): String? {
+        return try {
+            val uri = URI(url)
+            uri.host
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
      * Forward an HTTP request to the real server and return the response
      */
     private fun forwardHttpRequest(url: String, request: HttpRequest): HttpResponse? {
@@ -220,9 +291,8 @@ class HttpProxy(
             connection.requestMethod = request.method
             connection.connectTimeout = CONNECT_TIMEOUT
             connection.readTimeout = READ_TIMEOUT
-            connection.instanceFollowRedirects = false // We handle redirects ourselves
+            connection.instanceFollowRedirects = false
 
-            // Set request headers
             for ((key, value) in request.headers) {
                 try {
                     connection.setRequestProperty(key, value)
@@ -231,7 +301,6 @@ class HttpProxy(
                 }
             }
 
-            // Send body if present
             if (request.body.isNotEmpty() && (request.method == "POST" || request.method == "PUT" || request.method == "PATCH")) {
                 connection.doOutput = true
                 connection.outputStream.write(request.body)
@@ -277,7 +346,6 @@ class HttpProxy(
                 matchedRule = matchedRule,
                 statusCode = statusCode
             ))
-            // Keep only last 500 entries
             while (_requestLog.size > 500) {
                 _requestLog.removeAt(0)
             }

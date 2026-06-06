@@ -133,6 +133,26 @@ fun DashboardScreen(
             )
         }
 
+        item {
+            ToggleCard(
+                title = "Cosmetic Filtering",
+                subtitle = "Hide page elements with CSS (##selector rules)",
+                icon = Icons.Filled.VisibilityOff,
+                checked = true,
+                onCheckedChange = { /* cosmetic filtering is always on when MITM is active */ }
+            )
+        }
+
+        item {
+            ToggleCard(
+                title = "Scriptlet Injection",
+                subtitle = "Inject JS to neutralize trackers & anti-adblock",
+                icon = Icons.Filled.Code,
+                checked = true,
+                onCheckedChange = { /* scriptlets are always on when MITM is active */ }
+            )
+        }
+
         // Recent Blocked
         if (recentBlocked.isNotEmpty()) {
             item {
