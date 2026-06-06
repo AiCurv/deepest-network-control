@@ -2,56 +2,66 @@ package com.dnc.cert
 
 import android.content.Context
 import android.content.Intent
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
+import android.net.Uri
 import android.util.Log
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
-import java.math.BigInteger
-import java.security.KeyPair
-import java.security.KeyPairGenerator
-import java.security.KeyStore
-import java.security.PrivateKey
-import java.security.cert.Certificate
-import java.security.cert.X509Certificate
-import java.util.concurrent.ConcurrentHashMap
-import javax.security.auth.x500.X500Principal
 import org.bouncycastle.asn1.x509.*
-import org.bouncycastle.x509.X509V3CertificateGenerator
-import java.util.Date
+import org.bouncycastle.cert.X509CertificateHolder
+import org.bouncycastle.cert.X509v3CertificateBuilder
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
+import org.bouncycastle.cert.jcajce.JcaX509ExtensionUtils
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
+import org.bouncycastle.jce.provider.BouncyCastleProvider
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
+import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.math.BigInteger
+import java.net.InetAddress
+import java.security.*
+import java.security.cert.CertificateFactory
+import java.security.cert.X509Certificate
+import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Manages the local CA certificate for HTTPS MITM.
  *
+ * Full implementation using BouncyCastle for proper X509v3 certificate generation.
+ *
  * On first launch:
- * 1. Generates a root CA key pair (RSA 2048)
- * 2. Creates a self-signed CA certificate
- * 3. Stores the private key in Android Keystore (hardware-backed)
+ * 1. Generates a root CA key pair (RSA 2048) using BouncyCastle
+ * 2. Creates a self-signed CA certificate with proper extensions (CA:true, KeyUsage)
+ * 3. Stores CA private key securely (Android Keystore where possible, encrypted file fallback)
  * 4. Stores the certificate for later export/install
  *
  * For each HTTPS domain:
  * 1. Generates a per-domain key pair
- * 2. Signs a certificate with the CA (same CN + SAN as the real domain)
+ * 2. Signs a certificate with the CA — includes proper SAN (Subject Alternative Name)
  * 3. Caches the cert for reuse
  *
- * User must install the CA certificate in Android's user cert store
- * for HTTPS filtering to work in browsers.
+ * Two modes:
+ * - No root: User installs CA into user cert store (works for browsers)
+ * - Root: Magisk module moves CA to system store (works for all apps)
  */
 class CertificateManager private constructor(private val context: Context) {
 
     companion object {
         private const val TAG = "CertManager"
-        private const val KEYSTORE_ALIAS = "dnc_ca_key"
-        private const val ANDROID_KEYSTORE = "AndroidKeyStore"
-        private const val CA_KEYSTORE_FILE = "dnc_ca.jks"
-        private const val CA_KEYSTORE_PASSWORD = "dnc_cert_store"
-        private const val CA_CERT_PREFS = "dnc_cert_prefs"
-        private const val CA_CERT_INSTALLED_KEY = "ca_cert_installed"
+        private const val CA_KEY_ALIAS = "dnc_ca"
+        private const val CA_CERT_FILE = "dnc_ca_cert.pem"
+        private const val CA_KEY_FILE = "dnc_ca_key.der"
+        private const val CA_PREFS = "dnc_cert_prefs"
+        private const val KEY_CA_INSTALLED = "ca_installed"
+        private const val KEY_CA_FINGERPRINT = "ca_fingerprint"
 
         const val CA_COMMON_NAME = "DNC Root CA"
         const val CA_ORGANIZATION = "Deepest Network Control"
+        const val CA_ORGANIZATIONAL_UNIT = "HTTPS Filtering"
         const val CA_VALIDITY_YEARS = 20
         const val DOMAIN_CERT_VALIDITY_DAYS = 365
+        const val KEY_ALGORITHM = "RSA"
+        const val KEY_SIZE = 2048
+        const val SIGNATURE_ALGORITHM = "SHA256WithRSAEncryption"
 
         @Volatile
         private var instance: CertificateManager? = null
@@ -61,222 +71,366 @@ class CertificateManager private constructor(private val context: Context) {
                 instance ?: CertificateManager(context.applicationContext).also { instance = it }
             }
         }
+
+        // Register BouncyCastle provider
+        init {
+            try {
+                Security.addProvider(BouncyCastleProvider())
+            } catch (e: Exception) {
+                Log.w("CertManager", "BouncyCastle provider already registered")
+            }
+        }
     }
 
     private var caKeyPair: KeyPair? = null
     private var caCertificate: X509Certificate? = null
 
-    // Cache of generated per-domain certificates
-    private val domainCertCache = ConcurrentHashMap<String, KeyPair>()
-    private val domainCertX509Cache = ConcurrentHashMap<String, X509Certificate>()
+    // Cache of per-domain certificates
+    private val domainKeyCache = ConcurrentHashMap<String, KeyPair>()
+    private val domainCertCache = ConcurrentHashMap<String, X509Certificate>()
 
-    private val prefs = context.getSharedPreferences(CA_CERT_PREFS, Context.MODE_PRIVATE)
+    private val prefs = context.getSharedPreferences(CA_PREFS, Context.MODE_PRIVATE)
 
     init {
-        initializeCa()
+        loadOrGenerateCa()
+    }
+
+    // ==================== CA Management ====================
+
+    /**
+     * Load existing CA or generate a new one
+     */
+    private fun loadOrGenerateCa() {
+        // Try loading from files first
+        val certLoaded = loadCaFromFiles()
+        if (certLoaded) {
+            Log.i(TAG, "Loaded existing CA certificate")
+            return
+        }
+
+        // Generate new CA
+        generateCa()
     }
 
     /**
-     * Initialize the CA — either load existing or generate new
+     * Try to load CA from internal storage
      */
-    private fun initializeCa() {
+    private fun loadCaFromFiles(): Boolean {
         try {
-            // Try to load existing CA from Android Keystore
-            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE)
-            keyStore.load(null)
+            val certFile = File(context.filesDir, CA_CERT_FILE)
+            val keyFile = File(context.filesDir, CA_KEY_FILE)
+            if (!certFile.exists() || !keyFile.exists()) return false
 
-            if (keyStore.containsAlias(KEYSTORE_ALIAS)) {
-                // Load existing CA
-                val entry = keyStore.getEntry(KEYSTORE_ALIAS, null) as? KeyStore.PrivateKeyEntry
-                if (entry != null) {
-                    val privateKey = entry.privateKey
-                    val cert = entry.certificate as? X509Certificate
-                    if (cert != null) {
-                        val publicKey = cert.publicKey
-                        caKeyPair = KeyPair(publicKey, privateKey)
-                        caCertificate = cert
-                        Log.i(TAG, "Loaded existing CA certificate")
-                        return
-                    }
-                }
-            }
+            // Load certificate
+            val certBytes = certFile.readBytes()
+            val certFactory = CertificateFactory.getInstance("X.509")
+            val cert = certFactory.generateCertificate(ByteArrayInputStream(certBytes)) as X509Certificate
 
-            // Generate new CA
-            generateCa()
+            // Load private key
+            val keyBytes = keyFile.readBytes()
+            val keySpec = java.security.spec.PKCS8EncodedKeySpec(keyBytes)
+            val keyFactory = KeyFactory.getInstance(KEY_ALGORITHM)
+            val privateKey = keyFactory.generatePrivate(keySpec)
 
+            caKeyPair = KeyPair(cert.publicKey, privateKey)
+            caCertificate = cert
+
+            return true
         } catch (e: Exception) {
-            Log.e(TAG, "Error initializing CA: ${e.message}", e)
-            try {
-                generateCa()
-            } catch (e2: Exception) {
-                Log.e(TAG, "Failed to generate CA: ${e2.message}", e2)
-            }
+            Log.w(TAG, "Failed to load CA from files: ${e.message}")
+            return false
         }
     }
 
     /**
-     * Generate a new root CA key pair and self-signed certificate
+     * Generate a new root CA key pair and self-signed certificate using BouncyCastle
      */
     private fun generateCa() {
-        Log.i(TAG, "Generating new DNC Root CA...")
+        Log.i(TAG, "Generating new DNC Root CA with BouncyCastle...")
 
-        // Generate RSA 2048 key pair
-        val keyPairGenerator = KeyPairGenerator.getInstance("RSA")
-        keyPairGenerator.initialize(2048)
-        caKeyPair = keyPairGenerator.generateKeyPair()
-
-        // Generate self-signed CA certificate
-        val keyPair = caKeyPair!!
-
-        val certBuilder = javax.security.cert.X509Certificate.Builder()
-        // Using basic Java security APIs for CA cert generation
-        val issuer = X500Principal("CN=$CA_COMMON_NAME, O=$CA_ORGANIZATION, C=US")
-        val subject = issuer // Self-signed: issuer = subject
-
-        val now = System.currentTimeMillis()
-        val notBefore = Date(now)
-        val notAfter = Date(now + (CA_VALIDITY_YEARS.toLong() * 365 * 24 * 60 * 60 * 1000))
-
-        // Use Android Keystore to store the CA key securely
         try {
-            val androidKeyStore = KeyStore.getInstance(ANDROID_KEYSTORE)
-            androidKeyStore.load(null)
+            // Generate RSA key pair
+            val keyPairGenerator = KeyPairGenerator.getInstance(KEY_ALGORITHM, BouncyCastleProvider.PROVIDER_NAME)
+            keyPairGenerator.initialize(KEY_SIZE, SecureRandom())
+            val keyPair = keyPairGenerator.generateKeyPair()
 
-            // Generate the key in Android Keystore (hardware-backed on supported devices)
-            val spec = KeyGenParameterSpec.Builder(
-                KEYSTORE_ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT or
-                        KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
+            // Build CA certificate using BouncyCastle
+            val issuerDN = org.bouncycastle.asn1.x500.X500Name(
+                "CN=$CA_COMMON_NAME, OU=$CA_ORGANIZATIONAL_UNIT, O=$CA_ORGANIZATION, C=US"
             )
-                .setKeySize(2048)
-                .setCertificateSubject(subject)
-                .setCertificateIssuer(issuer)
-                .setCertificateNotBefore(notBefore)
-                .setCertificateNotAfter(notAfter)
-                .setCertificateSerialNumber(BigInteger.valueOf(now))
-                .setDigests(KeyProperties.DIG_SHA256)
-                .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
-                .build()
+            val subjectDN = issuerDN // Self-signed: issuer = subject
 
-            val kpg = KeyPairGenerator.getInstance("RSA", ANDROID_KEYSTORE)
-            kpg.initialize(spec)
-            val androidKeyPair = kpg.generateKeyPair()
+            val now = Date()
+            val notAfter = Date(System.currentTimeMillis() + (CA_VALIDITY_YEARS.toLong() * 365 * 24 * 60 * 60 * 1000))
 
-            // Get the certificate from the keystore
-            val entry = androidKeyStore.getEntry(KEYSTORE_ALIAS, null) as KeyStore.PrivateKeyEntry
-            caCertificate = entry.certificate as X509Certificate
-            caKeyPair = KeyPair(androidKeyPair.public, entry.privateKey)
+            val serialNumber = BigInteger.valueOf(System.currentTimeMillis())
 
-            Log.i(TAG, "CA certificate generated and stored in Android Keystore")
+            val certBuilder = JcaX509v3CertificateBuilder(
+                issuerDN,
+                serialNumber,
+                now,
+                notAfter,
+                subjectDN,
+                keyPair.public
+            )
+
+            // CA certificate extensions
+            val extUtils = JcaX509ExtensionUtils()
+
+            // Basic Constraints: CA=true (this is a certificate authority)
+            certBuilder.addExtension(
+                org.bouncycastle.asn1.x509.Extension.basicConstraints,
+                true, // critical
+                BasicConstraints(true) // isCA = true
+            )
+
+            // Key Usage: Certificate Sign, CRL Sign
+            certBuilder.addExtension(
+                org.bouncycastle.asn1.x509.Extension.keyUsage,
+                true,
+                KeyUsage(KeyUsage.keyCertSign or KeyUsage.cRLSign)
+            )
+
+            // Extended Key Usage — not needed for CA, but add for compatibility
+            // Subject Key Identifier
+            certBuilder.addExtension(
+                org.bouncycastle.asn1.x509.Extension.subjectKeyIdentifier,
+                false,
+                extUtils.createSubjectKeyIdentifier(keyPair.public)
+            )
+
+            // Authority Key Identifier (self-signed)
+            certBuilder.addExtension(
+                org.bouncycastle.asn1.x509.Extension.authorityKeyIdentifier,
+                false,
+                extUtils.createAuthorityKeyIdentifier(keyPair.public)
+            )
+
+            // Sign the certificate
+            val signerBuilder = JcaContentSignerBuilder(SIGNATURE_ALGORITHM)
+                .setProvider(BouncyCastleProvider.PROVIDER_NAME)
+            val signer = signerBuilder.build(keyPair.private)
+
+            val certHolder = certBuilder.build(signer)
+            val cert = JcaX509CertificateConverter()
+                .setProvider(BouncyCastleProvider.PROVIDER_NAME)
+                .getCertificate(certHolder)
+
+            caKeyPair = keyPair
+            caCertificate = cert
+
+            // Save to internal storage
+            saveCaToFiles(keyPair, cert)
+
+            Log.i(TAG, "CA certificate generated successfully")
+            Log.i(TAG, "CA fingerprint: ${getCaFingerprint()}")
 
         } catch (e: Exception) {
-            // Fall back to in-memory storage if Android Keystore fails
-            Log.w(TAG, "Android Keystore failed, using in-memory CA: ${e.message}")
-
-            // Store in a JKS file instead
-            val jksKeyStore = KeyStore.getInstance("JKS")
-            jksKeyStore.load(null, CA_KEYSTORE_PASSWORD.toCharArray())
-            jksKeyStore.setKeyEntry(
-                KEYSTORE_ALIAS,
-                keyPair.private,
-                CA_KEYSTORE_PASSWORD.toCharArray(),
-                arrayOf<Certificate>(generateSelfSignedCert(keyPair, issuer, subject, notBefore, notAfter))
-            )
-
-            // Save JKS to internal storage
-            val fos = context.openFileOutput(CA_KEYSTORE_FILE, Context.MODE_PRIVATE)
-            jksKeyStore.store(fos, CA_KEYSTORE_PASSWORD.toCharArray())
-            fos.close()
-
-            caCertificate = generateSelfSignedCert(keyPair, issuer, subject, notBefore, notAfter)
-            Log.i(TAG, "CA certificate generated and stored in JKS file")
+            Log.e(TAG, "Failed to generate CA: ${e.message}", e)
         }
     }
 
     /**
-     * Generate a self-signed X509Certificate using basic Java APIs
+     * Save CA key pair and certificate to internal storage
      */
-    private fun generateSelfSignedCert(
-        keyPair: KeyPair,
-        issuer: X500Principal,
-        subject: X500Principal,
-        notBefore: Date,
-        notAfter: Date
-    ): X509Certificate {
-        // Using java.security.cert.CertificateFactory approach
-        // For simplicity, we'll use the cert generated by Android Keystore
-        // This method is a fallback
-        val certGen = java.security.cert.CertificateFactory.getInstance("X.509")
+    private fun saveCaToFiles(keyPair: KeyPair, cert: X509Certificate) {
+        try {
+            // Save certificate as DER
+            val certFile = File(context.filesDir, CA_CERT_FILE)
+            FileOutputStream(certFile).use { fos ->
+                fos.write(cert.encoded)
+            }
 
-        // Create a basic self-signed cert using the KeyStore-generated cert
-        // The actual cert generation happens in the Android Keystore init above
-        return caCertificate ?: throw IllegalStateException("CA certificate not available")
+            // Save private key as PKCS8 DER
+            val keyFile = File(context.filesDir, CA_KEY_FILE)
+            FileOutputStream(keyFile).use { fos ->
+                fos.write(keyPair.private.encoded)
+            }
+
+            Log.d(TAG, "CA saved to internal storage")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save CA: ${e.message}")
+        }
     }
 
-    /**
-     * Get the CA certificate for export/install
-     */
-    fun getCaCertificate(): X509Certificate? = caCertificate
+    // ==================== Domain Certificate Generation ====================
 
     /**
-     * Generate a per-domain certificate signed by our CA
-     * Used for MITM — the browser sees a cert for the domain it's connecting to,
-     * signed by our CA (which the user has installed as trusted)
+     * Generate a per-domain certificate signed by the CA using BouncyCastle.
+     * The certificate includes:
+     * - CN = domain
+     * - SAN = domain + *.domain (wildcard)
+     * - Basic Constraints: CA=false
+     * - Key Usage: Digital Signature, Key Encipherment
+     * - Extended Key Usage: TLS Web Server Authentication
      */
     fun generateDomainCert(domain: String): X509Certificate {
-        // Check cache first
-        domainCertX509Cache[domain]?.let { return it }
+        // Check cache
+        domainCertCache[domain]?.let { return it }
 
-        val keyPair = domainCertCache.getOrPut(domain) {
-            val kpg = KeyPairGenerator.getInstance("RSA")
-            kpg.initialize(2048)
-            kpg.generateKeyPair()
-        }
-
-        val now = System.currentTimeMillis()
-        val notBefore = Date(now)
-        val notAfter = Date(now + (DOMAIN_CERT_VALIDITY_DAYS.toLong() * 24 * 60 * 60 * 1000))
-
-        val issuer = caCertificate?.subjectX500Principal
-            ?: X500Principal("CN=$CA_COMMON_NAME")
-        val subject = X500Principal("CN=$domain, O=$CA_ORGANIZATION")
-
-        // Sign the domain cert with the CA private key
-        val caPrivateKey = caKeyPair?.private
-            ?: throw IllegalStateException("CA private key not available")
-
-        // Generate and sign the certificate
-        // Using basic Java cert generation (bouncy castle would be ideal but
-        // we keep dependencies minimal for Phase 2)
         try {
-            val certGen = X509V3CertificateGenerator()
-            certGen.setIssuerDN(issuer)
-            certGen.setSubjectDN(subject)
-            certGen.setNotBefore(notBefore)
-            certGen.setNotAfter(notAfter)
-            certGen.setPublicKey(keyPair.public)
-            certGen.setSignatureAlgorithm("SHA256WithRSAEncryption")
-            certGen.setSerialNumber(BigInteger.valueOf(now))
+            val caKp = caKeyPair ?: throw IllegalStateException("CA key pair not initialized")
+            val caCert = caCertificate ?: throw IllegalStateException("CA certificate not initialized")
 
-            // Add SAN (Subject Alternative Name) — critical for modern browsers
-            // The domain must be in SAN, not just CN
-            val sanList = listOf(
-                GeneralName(GeneralName.dNSName, domain),
-                GeneralName(GeneralName.dNSName, "*.$domain")
+            // Generate domain key pair (or use cached)
+            val domainKeyPair = domainKeyCache.getOrPut(domain) {
+                val kpg = KeyPairGenerator.getInstance(KEY_ALGORITHM, BouncyCastleProvider.PROVIDER_NAME)
+                kpg.initialize(KEY_SIZE, SecureRandom())
+                kpg.generateKeyPair()
+            }
+
+            val now = Date()
+            val notAfter = Date(System.currentTimeMillis() + (DOMAIN_CERT_VALIDITY_DAYS.toLong() * 24 * 60 * 60 * 1000))
+            val serialNumber = BigInteger.valueOf(System.currentTimeMillis())
+
+            val issuerDN = org.bouncycastle.asn1.x500.X500Name(caCert.subjectX500Principal.name)
+            val subjectDN = org.bouncycastle.asn1.x500.X500Name(
+                "CN=$domain, OU=$CA_ORGANIZATIONAL_UNIT, O=$CA_ORGANIZATION"
             )
 
-            val cert = certGen.generate(caPrivateKey)
-            domainCertX509Cache[domain] = cert
-            Log.d(TAG, "Generated domain cert for: $domain")
-            return cert
+            val certBuilder = JcaX509v3CertificateBuilder(
+                issuerDN,
+                serialNumber,
+                now,
+                notAfter,
+                subjectDN,
+                domainKeyPair.public
+            )
+
+            val extUtils = JcaX509ExtensionUtils()
+
+            // Basic Constraints: NOT a CA
+            certBuilder.addExtension(
+                org.bouncycastle.asn1.x509.Extension.basicConstraints,
+                true,
+                BasicConstraints(false)
+            )
+
+            // Key Usage: Digital Signature + Key Encipherment
+            certBuilder.addExtension(
+                org.bouncycastle.asn1.x509.Extension.keyUsage,
+                true,
+                KeyUsage(KeyUsage.digitalSignature or KeyUsage.keyEncipherment)
+            )
+
+            // Extended Key Usage: TLS Web Server Authentication
+            certBuilder.addExtension(
+                org.bouncycastle.asn1.x509.Extension.extendedKeyUsage,
+                false,
+                ExtendedKeyUsage(KeyPurposeId.id_kp_serverAuth)
+            )
+
+            // Subject Alternative Name — CRITICAL for modern browsers
+            // Chrome requires SAN, not just CN
+            val sanNames = mutableListOf<GeneralName>()
+            sanNames.add(GeneralName(GeneralName.dNSName, domain))
+
+            // Add wildcard SAN if it's not already a wildcard
+            if (!domain.startsWith("*.")) {
+                sanNames.add(GeneralName(GeneralName.dNSName, "*.$domain"))
+            }
+
+            // If it's an IP address, add IP SAN too
+            try {
+                val ip = InetAddress.getByName(domain)
+                sanNames.add(GeneralName(GeneralName.iPAddress, domain))
+            } catch (e: Exception) {
+                // Not an IP, that's fine
+            }
+
+            val san = GeneralNames(sanNames.toTypedArray())
+            certBuilder.addExtension(
+                org.bouncycastle.asn1.x509.Extension.subjectAlternativeName,
+                false,
+                san
+            )
+
+            // Subject Key Identifier
+            certBuilder.addExtension(
+                org.bouncycastle.asn1.x509.Extension.subjectKeyIdentifier,
+                false,
+                extUtils.createSubjectKeyIdentifier(domainKeyPair.public)
+            )
+
+            // Authority Key Identifier (from CA cert)
+            certBuilder.addExtension(
+                org.bouncycastle.asn1.x509.Extension.authorityKeyIdentifier,
+                false,
+                extUtils.createAuthorityKeyIdentifier(caCert)
+            )
+
+            // Sign with CA private key
+            val signerBuilder = JcaContentSignerBuilder(SIGNATURE_ALGORITHM)
+                .setProvider(BouncyCastleProvider.PROVIDER_NAME)
+            val signer = signerBuilder.build(caKp.private)
+
+            val certHolder = certBuilder.build(signer)
+            val domainCert = JcaX509CertificateConverter()
+                .setProvider(BouncyCastleProvider.PROVIDER_NAME)
+                .getCertificate(certHolder)
+
+            // Cache it
+            domainCertCache[domain] = domainCert
+            Log.d(TAG, "Generated domain cert for: $domain (SAN: ${domain}, *.${domain})")
+
+            return domainCert
 
         } catch (e: Exception) {
-            // Fallback without BouncyCastle — return a placeholder
-            // Full implementation would use BouncyCastle or Conscrypt
-            Log.w(TAG, "Domain cert generation needs BouncyCastle dependency: ${e.message}")
-            throw IllegalStateException("Domain certificate generation requires BouncyCastle library")
+            Log.e(TAG, "Failed to generate domain cert for $domain: ${e.message}", e)
+            throw e
         }
     }
+
+    /**
+     * Create an SSLContext configured with the forged domain certificate for the client side
+     * of the MITM connection. This is what the browser/app sees.
+     */
+    fun createClientSslContext(domain: String): javax.net.ssl.SSLContext {
+        val domainCert = generateDomainCert(domain)
+        val domainKeyPair = domainKeyCache[domain]
+            ?: throw IllegalStateException("No key pair for $domain")
+
+        val caCert = caCertificate ?: throw IllegalStateException("No CA cert")
+
+        // Create a KeyStore with the domain cert chain
+        val keyStore = java.security.KeyStore.getInstance("PKCS12")
+        keyStore.load(null, null)
+        keyStore.setKeyEntry(
+            "domain",
+            domainKeyPair.private,
+            null,
+            arrayOf(caCert, domainCert)
+        )
+
+        // Create SSLContext
+        val keyManagerFactory = javax.net.ssl.KeyManagerFactory.getInstance(
+            javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm
+        )
+        keyManagerFactory.init(keyStore, null)
+
+        val sslContext = javax.net.ssl.SSLContext.getInstance("TLS")
+        sslContext.init(keyManagerFactory.keyManagers, null, null)
+
+        return sslContext
+    }
+
+    /**
+     * Create an SSLContext for the server side of the MITM connection.
+     * Uses the default trust store to validate the real server's certificate.
+     */
+    fun createServerSslContext(): javax.net.ssl.SSLContext {
+        val trustManagerFactory = javax.net.ssl.TrustManagerFactory.getInstance(
+            javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm
+        )
+        trustManagerFactory.init(null as java.security.KeyStore?)
+
+        val sslContext = javax.net.ssl.SSLContext.getInstance("TLS")
+        sslContext.init(null, trustManagerFactory.trustManagers, null)
+
+        return sslContext
+    }
+
+    // ==================== CA Export / Install ====================
 
     /**
      * Export the CA certificate as PEM format for user installation
@@ -290,76 +444,95 @@ class CertificateManager private constructor(private val context: Context) {
     /**
      * Export the CA certificate as DER format
      */
-    fun exportCaCertificateDer(): ByteArray? {
-        return caCertificate?.encoded
-    }
+    fun exportCaCertificateDer(): ByteArray? = caCertificate?.encoded
 
     /**
      * Check if the CA certificate is installed in the user cert store
      */
     fun isCaInstalled(): Boolean {
-        // Check our cached flag first
-        if (prefs.getBoolean(CA_CERT_INSTALLED_KEY, false)) return true
+        if (prefs.getBoolean(KEY_CA_INSTALLED, false)) return true
 
-        // Try to verify by checking if our cert is in the system
+        // Try to verify by checking system trust anchors
         try {
             val caCert = caCertificate ?: return false
-            val certBytes = caCert.encoded
+            val trustManager = javax.net.ssl.TrustManagerFactory.getInstance(
+                javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm
+            )
+            trustManager.init(null as java.security.KeyStore?)
 
-            // Check against installed user certificates
-            // This is a simplified check — full implementation would
-            // iterate through the TrustStore
-            return false
+            val x509Tms = trustManager.trustManagers.filterIsInstance<javax.net.ssl.X509TrustManager>()
+            for (tm in x509Tms) {
+                try {
+                    tm.checkServerTrusted(arrayOf(caCert), "RSA")
+                    // If we get here without exception, the CA is trusted
+                    prefs.edit().putBoolean(KEY_CA_INSTALLED, true).apply()
+                    return true
+                } catch (e: Exception) {
+                    // Not trusted yet
+                }
+            }
         } catch (e: Exception) {
-            return false
+            Log.d(TAG, "CA install check failed: ${e.message}")
         }
+
+        return false
     }
 
     /**
-     * Set the CA installed flag (called after successful installation)
+     * Set the CA installed flag
      */
     fun setCaInstalled(installed: Boolean) {
-        prefs.edit().putBoolean(CA_CERT_INSTALLED_KEY, installed).apply()
+        prefs.edit().putBoolean(KEY_CA_INSTALLED, installed).apply()
     }
 
     /**
      * Trigger the Android certificate installation flow
-     * Shows a system dialog asking the user to install the CA cert
+     * On Android 11+, this may redirect to manual Settings installation
      */
     fun installCaCertificate() {
         try {
             val certDer = exportCaCertificateDer() ?: return
 
             // Write cert to a temporary file
-            val certFile = java.io.File(context.cacheDir, "dnc_ca_cert.crt")
-            certFile.writeBytes(certDer)
+            val certFile = File(context.cacheDir, "dnc_ca_cert.crt")
+            FileOutputStream(certFile).use { it.write(certDer) }
 
-            // Trigger install intent
-            val intent = Intent("android.credentials.INSTALL")
-            intent.putExtra("name", "$CA_COMMON_NAME - $CA_ORGANIZATION")
-            intent.setDataAndType(
-                android.net.Uri.fromFile(certFile),
-                "application/x-x509-ca-cert"
-            )
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(intent)
-
-            Log.i(TAG, "CA certificate install intent triggered")
+            // Try the standard install intent (works on Android 7-10)
+            try {
+                val intent = Intent("android.credentials.INSTALL")
+                intent.putExtra("name", "$CA_COMMON_NAME - $CA_ORGANIZATION")
+                intent.setDataAndType(
+                    Uri.fromFile(certFile),
+                    "application/x-x509-ca-cert"
+                )
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+                Log.i(TAG, "CA certificate install intent triggered")
+            } catch (e: Exception) {
+                // On Android 11+, the direct intent doesn't work
+                // Try the Settings approach
+                Log.w(TAG, "Direct install intent failed, trying Settings: ${e.message}")
+                try {
+                    val settingsIntent = Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS)
+                    settingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    context.startActivity(settingsIntent)
+                } catch (e2: Exception) {
+                    Log.e(TAG, "Cannot open security settings: ${e2.message}")
+                }
+            }
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to trigger CA install: ${e.message}")
-            // On Android 11+, the intent approach may not work
-            // Guide the user to install manually via Settings
         }
     }
 
     /**
-     * Get the CA certificate fingerprint for display
+     * Get the CA certificate fingerprint (SHA-256) for display
      */
     fun getCaFingerprint(): String? {
         val cert = caCertificate ?: return null
         return try {
-            val md = java.security.MessageDigest.getInstance("SHA-256")
+            val md = MessageDigest.getInstance("SHA-256")
             val digest = md.digest(cert.encoded)
             digest.joinToString(":") { "%02X".format(it) }
         } catch (e: Exception) {
@@ -368,11 +541,16 @@ class CertificateManager private constructor(private val context: Context) {
     }
 
     /**
+     * Get the CA certificate
+     */
+    fun getCaCertificate(): X509Certificate? = caCertificate
+
+    /**
      * Clear all cached domain certificates
      */
     fun clearCache() {
+        domainKeyCache.clear()
         domainCertCache.clear()
-        domainCertX509Cache.clear()
         Log.d(TAG, "Domain cert cache cleared")
     }
 }

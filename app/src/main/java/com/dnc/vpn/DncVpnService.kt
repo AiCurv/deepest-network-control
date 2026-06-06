@@ -101,6 +101,7 @@ class DncVpnService : VpnService() {
             _isRunning.value = true
             dnsInterceptor.start()
             httpProxy.start()
+            httpsProxy.setHttpProxy(httpProxy) // Wire up HTTP proxy for MITM decrypted traffic
             httpsProxy.start()
 
             vpnThread = Thread { processPackets() }

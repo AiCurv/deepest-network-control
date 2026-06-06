@@ -55,6 +55,8 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            // BouncyCastle duplicate files
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         }
     }
 }
@@ -96,4 +98,8 @@ dependencies {
 
     // Accompanist for system UI
     implementation("com.google.accompanist:accompanist-systemuicontroller:0.34.0")
+
+    // BouncyCastle for X509 certificate generation (MITM)
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
 }
