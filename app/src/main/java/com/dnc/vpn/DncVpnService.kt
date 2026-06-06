@@ -175,7 +175,7 @@ class DncVpnService : VpnService() {
         }
     }
 
-    private fun handleUdpPacket(ipPacket: IpPacket, outputStream: FileOutputStream) {
+    private fun handleUdpPacket(ipPacket: PacketParser.IpPacket, outputStream: FileOutputStream) {
         val udpPacket = PacketParser.parseUdpPacket(ipPacket.payload) ?: return
 
         // Port 53 = DNS
@@ -202,7 +202,7 @@ class DncVpnService : VpnService() {
         forwardPacket(ipPacket, outputStream)
     }
 
-    private fun handleTcpPacket(ipPacket: IpPacket, outputStream: FileOutputStream) {
+    private fun handleTcpPacket(ipPacket: PacketParser.IpPacket, outputStream: FileOutputStream) {
         val tcpPacket = PacketParser.parseTcpPacket(ipPacket.payload) ?: return
 
         when (tcpPacket.destinationPort) {
@@ -212,7 +212,7 @@ class DncVpnService : VpnService() {
         }
     }
 
-    private fun forwardPacket(ipPacket: IpPacket, outputStream: FileOutputStream) {
+    private fun forwardPacket(ipPacket: PacketParser.IpPacket, outputStream: FileOutputStream) {
         // For packets we don't filter, forward directly
         // In a full implementation this would use a protected socket
         // For Phase 1, non-HTTP/HTTPS traffic passes through

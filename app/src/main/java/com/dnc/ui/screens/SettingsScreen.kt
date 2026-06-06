@@ -172,7 +172,7 @@ fun SettingsScreen(
                                     contentColor = Color.Black
                                 )
                             ) {
-                                Icon(Icons.Filled.Certificate, null, modifier = Modifier.size(18.dp))
+                                Icon(Icons.Filled.VerifiedUser, null, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text("Install CA Certificate")
                             }

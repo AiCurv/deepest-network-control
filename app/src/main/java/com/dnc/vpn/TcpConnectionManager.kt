@@ -231,7 +231,7 @@ class TcpConnectionManager {
      * (we handle our own thread safety via ConcurrentHashMap)
      */
     class ByteArrayOutputStream : java.io.ByteArrayOutputStream() {
-        fun reset() {
+        override fun reset() {
             count = 0
         }
     }
