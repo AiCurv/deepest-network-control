@@ -516,7 +516,7 @@ class FilterEngine private constructor(private val context: Context) {
         val builtInRules = listOf(
             // Redirect domains that users commonly want to block
             "||displayendpointstarring.com^",
-            "||displayendpointstarring.com^$important"
+            "||displayendpointstarring.com^\$important"
         )
 
         for (ruleText in builtInRules) {
