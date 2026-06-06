@@ -103,7 +103,7 @@ class DnsInterceptor(private val vpnService: DncVpnService) {
         destIp: ByteArray,
         sourceIp: ByteArray,
         sourcePort: Int,
-        onAsyncResponse: (ByteArray) -> Unit
+        onAsyncResponse: (ByteArray?) -> Unit
     ): ByteArray? {
         if (!isRunning) return null
 

@@ -288,10 +288,7 @@ class TcpRelay(
                 val rst = PacketParser.buildTcpRst(
                     sourceIp = dstIp,
                     destIp = srcIp,
-                    sourcePort = ipPacket.destinationPort.let { dstPort ->
-                        // Get the dest port from the IP packet's perspective
-                        tcpPacket.destinationPort
-                    },
+                    sourcePort = tcpPacket.destinationPort,
                     destPort = tcpPacket.sourcePort,
                     seqNum = conn.serverSeq,
                     ipPacketId = nextPacketId()
@@ -439,14 +436,16 @@ class TcpRelay(
                         ipPacketId = nextPacketId()
                     )
 
+                    var writeFailed = false
                     synchronized(outputStream) {
                         try {
                             outputStream.write(responsePacket)
                         } catch (e: Exception) {
                             Log.w(TAG, "Error writing to TUN for $key: ${e.message}")
-                            break
+                            writeFailed = true
                         }
                     }
+                    if (writeFailed) break
 
                     conn.serverSeq += chunkSize
                     offset += chunkSize

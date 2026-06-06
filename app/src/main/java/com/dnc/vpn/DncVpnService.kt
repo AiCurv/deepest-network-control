@@ -320,7 +320,7 @@ class DncVpnService : VpnService() {
             var socket: DatagramSocket? = null
             try {
                 socket = DatagramSocket()
-                vpnService.protectSocket(socket)
+                protectSocket(socket)
                 socket.soTimeout = 5000
 
                 val serverAddress = InetAddress.getByAddress(ipPacket.destinationAddress)

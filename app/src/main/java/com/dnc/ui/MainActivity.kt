@@ -45,8 +45,7 @@ class MainActivity : ComponentActivity() {
                             } else {
                                 stopVpnService()
                             }
-                        },
-                        repository = repository
+                        }
                     )
                 }
             }
