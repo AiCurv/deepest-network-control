@@ -9,7 +9,7 @@ import android.util.Log
  * - Basic blocking: ||ads.example.com^
  * - Exception rules: @@||example.com^
  * - Domain anchors: ||domain.com and |https://
- * - Path wildcards: /ads/*
+ * - Path wildcards: /ads/ *
  * - Separator wildcard: ^
  * - Regex filters: /regex/
  * - Domain restrictions: $domain=example.com|~foo.example.com
