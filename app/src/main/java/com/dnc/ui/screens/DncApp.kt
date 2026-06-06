@@ -35,8 +35,9 @@ fun DncApp(
     val isVpnActive by DncVpnService.isRunning.collectAsState()
     val filterEngine = FilterEngine.getInstance()
     val stats by remember { mutableStateOf(filterEngine.getStats()) }
-
-    val blockedCount by remember { mutableStateOf(0) }
+    val blockedCount by DncVpnService.blockedCount.collectAsState()
+    val dnsQueryCount by DncVpnService.dnsQueryCount.collectAsState()
+    val redirectsBlocked by DncVpnService.redirectsBlockedCount.collectAsState()
 
     val screens = listOf(
         Screen.Dashboard,
@@ -97,9 +98,9 @@ fun DncApp(
                 DashboardScreen(
                     isVpnActive = isVpnActive,
                     onVpnToggle = onVpnToggle,
-                    blockedCount = stats.blockedRequests.toInt(),
-                    dnsQueryCount = 0,
-                    redirectsBlocked = 0,
+                    blockedCount = blockedCount,
+                    dnsQueryCount = dnsQueryCount,
+                    redirectsBlocked = redirectsBlocked,
                     activeRulesCount = stats.totalRules,
                     recentBlocked = listOf(
                         "ads.google.com",
@@ -107,7 +108,9 @@ fun DncApp(
                         "doubleclick.net",
                         "adservice.google.com",
                         "analytics.google.com"
-                    )
+                    ),
+                    httpsFilteringEnabled = false,
+                    onHttpsFilteringChanged = { /* TODO: wire to HttpsProxy */ }
                 )
             }
 
@@ -125,8 +128,10 @@ fun DncApp(
 
             composable(Screen.Settings.route) {
                 SettingsScreen(
-                    onInstallCaCert = { /* Will be wired to CertificateManager */ },
-                    isCaInstalled = false
+                    onInstallCaCert = { /* TODO: wire to CertificateManager */ },
+                    isCaInstalled = false,
+                    httpsFilteringEnabled = false,
+                    onHttpsFilteringChanged = { /* TODO: wire to HttpsProxy */ }
                 )
             }
         }

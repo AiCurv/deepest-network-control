@@ -2,7 +2,7 @@ package com.dnc.handler
 
 import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
-import java.util.Base64
+import android.util.Base64
 
 /**
  * Registry of built-in redirect resources for $redirect rules.
@@ -109,9 +109,10 @@ class ResourceRegistry {
         ))
 
         // 1x1 transparent PNG
-        val png1x1 = Base64.getDecoder().decode(
+        val png1x1 = Base64.decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAB" +
-            "Nl7BcQAAAABJRU5ErkJggg=="
+            "Nl7BcQAAAABJRU5ErkJggg==",
+            Base64.DEFAULT
         )
         registerResource(RedirectResource(
             name = "1x1.png",
@@ -122,9 +123,10 @@ class ResourceRegistry {
         ))
 
         // 2x2 transparent PNG
-        val png2x2 = Base64.getDecoder().decode(
+        val png2x2 = Base64.decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAG0lEQVQI12NgAAIABQAB" +
-            "Nl7BcQAAAABJRU5ErkJggg=="
+            "Nl7BcQAAAABJRU5ErkJggg==",
+            Base64.DEFAULT
         )
         registerResource(RedirectResource(
             name = "2x2.png",
@@ -135,9 +137,10 @@ class ResourceRegistry {
         ))
 
         // 3x2 transparent PNG
-        val png3x2 = Base64.getDecoder().decode(
+        val png3x2 = Base64.decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAYAAACYYJw9AAAAG0lEQVQI12NgAAIABQAB" +
-            "Nl7BcQAAAABJRU5ErkJggg=="
+            "Nl7BcQAAAABJRU5ErkJggg==",
+            Base64.DEFAULT
         )
         registerResource(RedirectResource(
             name = "3x2.png",

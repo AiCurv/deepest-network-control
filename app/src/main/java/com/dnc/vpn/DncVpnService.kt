@@ -41,7 +41,7 @@ class DncVpnService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
     private var vpnThread: Thread? = null
-    private var isRunning = false
+    private var vpnRunning = false
 
     private lateinit var dnsInterceptor: DnsInterceptor
     private lateinit var httpProxy: HttpProxy
@@ -73,7 +73,7 @@ class DncVpnService : VpnService() {
     }
 
     private fun startVpn() {
-        if (isRunning) return
+        if (vpnRunning) return
 
         createNotificationChannel()
 
@@ -97,7 +97,7 @@ class DncVpnService : VpnService() {
                 return
             }
 
-            isRunning = true
+            vpnRunning = true
             _isRunning.value = true
             dnsInterceptor.start()
             httpProxy.start()
@@ -116,7 +116,7 @@ class DncVpnService : VpnService() {
     }
 
     private fun stopVpn() {
-        isRunning = false
+        vpnRunning = false
         _isRunning.value = false
 
         try {
@@ -149,7 +149,7 @@ class DncVpnService : VpnService() {
         val outputStream = FileOutputStream(fileDescriptor)
         val packet = ByteArray(VPN_MTU + 28) // IP header max 60 + TCP header max 60 + data
 
-        while (isRunning && !Thread.currentThread().isInterrupted) {
+        while (vpnRunning && !Thread.currentThread().isInterrupted) {
             try {
                 val length = inputStream.read(packet)
                 if (length <= 0) continue
@@ -165,7 +165,7 @@ class DncVpnService : VpnService() {
             } catch (e: InterruptedException) {
                 break
             } catch (e: Exception) {
-                if (isRunning) {
+                if (vpnRunning) {
                     Log.e(TAG, "Error processing packet: ${e.message}")
                 }
             }

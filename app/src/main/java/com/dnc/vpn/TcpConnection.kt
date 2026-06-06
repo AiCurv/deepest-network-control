@@ -2,12 +2,7 @@ package com.dnc.vpn
 
 import android.util.Log
 import com.dnc.vpn.PacketParser.IpPacket
-import com.dnc.vpn.PacketParser.TcpHeader
-import com.dnc.vpn.PacketParser.TCP_FLAG_SYN
-import com.dnc.vpn.PacketParser.TCP_FLAG_ACK
-import com.dnc.vpn.PacketParser.TCP_FLAG_FIN
-import com.dnc.vpn.PacketParser.TCP_FLAG_RST
-import com.dnc.vpn.PacketParser.TCP_FLAG_PSH
+import com.dnc.vpn.PacketParser.TcpPacket
 import java.io.ByteArrayOutputStream
 import java.net.InetAddress
 import java.nio.ByteBuffer
@@ -170,7 +165,7 @@ class TcpConnection(
      * @param payload The TCP payload bytes.
      * @return A list of complete [HttpMessage]s if any were assembled.
      */
-    fun processOutboundSegment(tcpHeader: TcpHeader, payload: ByteArray): List<HttpMessage> {
+    fun processOutboundSegment(tcpHeader: TcpPacket, payload: ByteArray): List<HttpMessage> {
         lastActivityMs = System.currentTimeMillis()
         updateStateFlags(tcpHeader)
 
@@ -178,7 +173,7 @@ class TcpConnection(
 
         clientSeq = tcpHeader.sequenceNumber
         clientAck = tcpHeader.acknowledgmentNumber
-        clientWindow = tcpHeader.window
+        clientWindow = tcpHeader.windowSize
 
         if (outboundBuffer.size() + payload.size > MAX_BUFFER_SIZE) {
             Log.w(TAG, "Outbound buffer overflow for $flowKey, flushing")
@@ -196,7 +191,7 @@ class TcpConnection(
      * @param payload The TCP payload bytes.
      * @return A list of complete [HttpMessage]s if any were assembled.
      */
-    fun processInboundSegment(tcpHeader: TcpHeader, payload: ByteArray): List<HttpMessage> {
+    fun processInboundSegment(tcpHeader: TcpPacket, payload: ByteArray): List<HttpMessage> {
         lastActivityMs = System.currentTimeMillis()
         updateStateFlags(tcpHeader)
 
@@ -204,7 +199,7 @@ class TcpConnection(
 
         serverSeq = tcpHeader.sequenceNumber
         serverAck = tcpHeader.acknowledgmentNumber
-        serverWindow = tcpHeader.window
+        serverWindow = tcpHeader.windowSize
 
         if (inboundBuffer.size() + payload.size > MAX_BUFFER_SIZE) {
             Log.w(TAG, "Inbound buffer overflow for $flowKey, flushing")
@@ -218,10 +213,10 @@ class TcpConnection(
     /**
      * Initialize sequence numbers from the client's SYN packet.
      */
-    fun initFromClientSyn(tcpHeader: TcpHeader) {
+    fun initFromClientSyn(tcpHeader: TcpPacket) {
         clientIsn = tcpHeader.sequenceNumber
         clientSeq = tcpHeader.sequenceNumber
-        clientWindow = tcpHeader.window
+        clientWindow = tcpHeader.windowSize
         state = State.SYN_RECEIVED
         Log.d(TAG, "SYN from client $flowKey, ISN=$clientIsn")
     }
@@ -229,10 +224,10 @@ class TcpConnection(
     /**
      * Initialize server sequence number from SYN-ACK.
      */
-    fun initFromServerSynAck(tcpHeader: TcpHeader) {
+    fun initFromServerSynAck(tcpHeader: TcpPacket) {
         serverIsn = tcpHeader.sequenceNumber
         serverSeq = tcpHeader.sequenceNumber
-        serverWindow = tcpHeader.window
+        serverWindow = tcpHeader.windowSize
         state = State.ESTABLISHED
         Log.d(TAG, "SYN-ACK from server $flowKey, ISN=$serverIsn")
     }
@@ -240,7 +235,7 @@ class TcpConnection(
     /**
      * Update TCP state machine based on flag transitions.
      */
-    private fun updateStateFlags(tcpHeader: TcpHeader) {
+    private fun updateStateFlags(tcpHeader: TcpPacket) {
         when (state) {
             State.SYN_RECEIVED -> {
                 if (tcpHeader.isAck && !tcpHeader.isSyn) {
@@ -641,11 +636,12 @@ class TcpConnectionTracker {
      * If the connection already exists, it is returned.
      */
     fun getOrCreate(packet: IpPacket): TcpConnection? {
-        val tcpHeader = packet.tcpHeader ?: return null
+        val tcpPayload = packet.payload
+        val tcpHeader = PacketParser.parseTcpPacket(tcpPayload) ?: return null
 
-        val srcIp = packet.ipHeader.sourceIp
+        val srcIp = InetAddress.getByAddress(packet.sourceAddress)
         val srcPort = tcpHeader.sourcePort
-        val dstIp = packet.ipHeader.destinationIp
+        val dstIp = InetAddress.getByAddress(packet.destinationAddress)
         val dstPort = tcpHeader.destinationPort
 
         val key = "${srcIp.hostAddress}:$srcPort-${dstIp.hostAddress}:$dstPort"

@@ -21,14 +21,20 @@ import com.dnc.ui.theme.*
 @Composable
 fun SettingsScreen(
     onInstallCaCert: () -> Unit = {},
-    isCaInstalled: Boolean = false
+    isCaInstalled: Boolean = false,
+    httpsFilteringEnabled: Boolean = false,
+    onHttpsFilteringChanged: (Boolean) -> Unit = {},
+    excludedDomains: List<String> = listOf("chase.com", "paypal.com", "bankofamerica.com"),
+    onAddExcludedDomain: (String) -> Unit = {},
+    onRemoveExcludedDomain: (String) -> Unit = {}
 ) {
     var selectedDns by remember { mutableStateOf(0) }
-    var httpsFiltering by remember { mutableStateOf(false) }
+    var httpsFiltering by remember { mutableStateOf(httpsFilteringEnabled) }
     var redirectBlockAction by remember { mutableStateOf(0) }
     var autoStart by remember { mutableStateOf(false) }
     var newExcludedDomain by remember { mutableStateOf("") }
-    var excludedDomains by remember { mutableStateOf(listOf("chase.com", "paypal.com", "bankofamerica.com")) }
+    val initialExcludedDomains = excludedDomains
+    var excludedDomains by remember { mutableStateOf(initialExcludedDomains) }
 
     LazyColumn(
         modifier = Modifier
@@ -123,7 +129,10 @@ fun SettingsScreen(
                         }
                         Switch(
                             checked = httpsFiltering,
-                            onCheckedChange = { httpsFiltering = it },
+                            onCheckedChange = {
+                                httpsFiltering = it
+                                onHttpsFilteringChanged(it)
+                            },
                             colors = SwitchDefaults.colors(
                                 checkedTrackColor = DncCyan,
                                 checkedThumbColor = Color.Black
@@ -215,6 +224,7 @@ fun SettingsScreen(
                         IconButton(onClick = {
                             if (newExcludedDomain.isNotBlank()) {
                                 excludedDomains = excludedDomains + newExcludedDomain
+                                onAddExcludedDomain(newExcludedDomain)
                                 newExcludedDomain = ""
                             }
                         }) {
@@ -236,7 +246,10 @@ fun SettingsScreen(
                                 color = DncOnSurface
                             )
                             IconButton(
-                                onClick = { excludedDomains = excludedDomains - domain },
+                                onClick = {
+                                    excludedDomains = excludedDomains - domain
+                                    onRemoveExcludedDomain(domain)
+                                },
                                 modifier = Modifier.size(24.dp)
                             ) {
                                 Icon(Icons.Filled.Close, "Remove", tint = DncRed, modifier = Modifier.size(16.dp))

@@ -32,10 +32,12 @@ fun DashboardScreen(
     dnsQueryCount: Int,
     redirectsBlocked: Int,
     activeRulesCount: Int,
-    recentBlocked: List<String>
+    recentBlocked: List<String>,
+    httpsFilteringEnabled: Boolean,
+    onHttpsFilteringChanged: (Boolean) -> Unit = {}
 ) {
     var dnsEnabled by remember { mutableStateOf(true) }
-    var httpsEnabled by remember { mutableStateOf(false) }
+    var httpsEnabled by remember { mutableStateOf(httpsFilteringEnabled) }
     var redirectBlockEnabled by remember { mutableStateOf(true) }
 
     LazyColumn(
@@ -119,7 +121,10 @@ fun DashboardScreen(
                 subtitle = if (httpsEnabled) "Inspect HTTPS traffic (CA required)" else "Install CA cert to enable",
                 icon = Icons.Filled.Lock,
                 checked = httpsEnabled,
-                onCheckedChange = { httpsEnabled = it }
+                onCheckedChange = {
+                    httpsEnabled = it
+                    onHttpsFilteringChanged(it)
+                }
             )
         }
 
@@ -202,7 +207,7 @@ private fun ShieldToggle(
                     if (isActive) DncGreen.copy(alpha = pulseAlpha * 0.2f) else DncSurfaceVariant,
                     CircleShape
                 )
-                .clickable { onToggleToggle(!isActive) },
+                .clickable { onToggle(!isActive) },
             contentAlignment = Alignment.Center
         ) {
             Icon(
@@ -360,5 +365,4 @@ private fun BlockedItem(domain: String) {
     }
 }
 
-// Fix typo in ShieldToggle
-private fun onToggleToggle(b: Boolean) {}
+
